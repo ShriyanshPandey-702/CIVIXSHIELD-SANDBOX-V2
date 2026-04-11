@@ -39,3 +39,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# sandbox temporary tests
+sbi_test.png
+test-phishing-local.html
+*.webp
+*.png
