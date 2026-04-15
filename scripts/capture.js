@@ -1,4 +1,5 @@
 const { chromium } = require('playwright');
+const { createWorker } = require('tesseract.js');
 const url = process.argv[2];
 const isDev = process.env.NODE_ENV !== 'production';
 
@@ -62,21 +63,37 @@ function getRootDomain(host) {
 }
 
 // Explicit list — root domain must be an EXACT match
+// Includes all official subdomains that resolve to these roots via getRootDomain()
 const TRUSTED_ROOTS = new Set([
-  "google.com", "youtube.com", "gmail.com",
-  "facebook.com", "instagram.com", "twitter.com", "x.com",
-  "whatsapp.com", "microsoft.com", "apple.com",
-  "amazon.com", "amazon.in",
-  "flipkart.com",
-  "netflix.com", "linkedin.com", "github.com",
-  "stackoverflow.com", "wikipedia.org", "reddit.com",
-  "dropbox.com", "spotify.com", "zoom.us", "slack.com",
-  "notion.so", "figma.com", "canva.com", "adobe.com",
-  "cloudflare.com", "vercel.com", "paypal.com", "stripe.com",
-  "sbi.co.in", "onlinesbi.sbi",
-  "hdfcbank.com", "icicibank.com",
-  "indianrailways.gov.in", "irctc.co.in",
-  "incometax.gov.in", "uidai.gov.in", "npci.org.in",
+  // Google ecosystem
+  "google.com", "google.co.in", "google.co.uk", "youtube.com", "gmail.com",
+  // Microsoft ecosystem
+  "microsoft.com", "microsoftonline.com", "live.com", "outlook.com",
+  "office.com", "azure.com", "bing.com", "xbox.com", "linkedin.com",
+  // Apple
+  "apple.com", "icloud.com",
+  // Meta
+  "facebook.com", "instagram.com", "whatsapp.com", "meta.com",
+  // Amazon
+  "amazon.com", "amazon.in", "amazon.co.uk", "amazonaws.com",
+  // Finance & payments
+  "paypal.com", "stripe.com",
+  "sbi.co.in", "onlinesbi.sbi", "hdfcbank.com", "icicibank.com",
+  "npci.org.in",
+  // Dev & cloud
+  "github.com", "gitlab.com", "cloudflare.com", "vercel.com",
+  "stackoverflow.com", "heroku.com",
+  // Social & content
+  "twitter.com", "x.com", "reddit.com", "wikipedia.org",
+  "netflix.com", "spotify.com", "dropbox.com",
+  // Productivity
+  "slack.com", "zoom.us", "notion.so", "figma.com",
+  "canva.com", "adobe.com", "salesforce.com",
+  // Commerce
+  "flipkart.com", "shopify.com",
+  // Indian government & banking
+  "irctc.co.in", "indianrailways.gov.in",
+  "incometax.gov.in", "uidai.gov.in",
 ]);
 
 (async () => {
@@ -666,14 +683,8 @@ const TRUSTED_ROOTS = new Set([
       if (isDev) console.error("[CIVIX] Gemini key not set — using heuristic only");
     }
 
-    // ─── FINAL TRUSTED DOMAIN SAFETY NET ─────────────────────────────────────
-    // Hard guarantee: trusted domain NEVER leaves as HIGH or MEDIUM
-    // unless both credential signals fire (the only legitimate exception)
-    if (isTrustedBrand && !(hasPasswordField && hasPhishingContent)) {
-      riskScore = Math.min(riskScore, 15);
-      riskLevel = "LOW";
-      explanation = `This website appears legitimate:\n• Domain and content are consistent with a recognized trusted brand\n• No strong phishing indicators were detected\n\nHowever, always verify URLs before sharing sensitive information.`;
-    }
+    // NOTE: Trusted domain final override is applied AFTER fake login + OCR
+    // (see ABSOLUTE FINAL TRUST OVERRIDE block below) so no layer can re-escalate.
 
     // ─── FAKE LOGIN FORM DETECTION ENGINE ────────────────────────────────────
     // Applied AFTER trusted safety net so trusted sites are fully immune.
@@ -745,6 +756,135 @@ const TRUSTED_ROOTS = new Set([
       }
     }
 
+    // ─── OCR SCREENSHOT TEXT DETECTION ────────────────────────────────────────
+    // Reads visible text from the screenshot image (catches dynamically rendered
+    // or canvas-based phishing pages that hide content from DOM/HTML inspection).
+    let ocrDetectedText = "";
+    let ocrSignals = [];
+    let ocrRiskScore = 0;
+
+    const OCR_PHRASES = [
+      "verify your account", "account suspended", "urgent action required",
+      "claim reward", "payment failed", "kyc update", "security alert",
+      "login expired", "confirm identity", "bank verification",
+      "gift card", "lottery winner", "limited time", "click below",
+      "reset password", "act now", "account blocked", "verify now",
+      "congratulations you won", "free gift", "claim your prize",
+    ];
+
+    try {
+      // Race against a 20s timeout — OCR must not block the full response
+      const ocrTimeout = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('OCR timeout after 20s')), 20000)
+      );
+
+      const ocrRun = (async () => {
+        const worker = await createWorker('eng', 1, {
+          logger: () => {}, // Silence progress logs
+          errorHandler: () => {},
+        });
+        try {
+          const { data: { text } } = await worker.recognize(screenshotBuffer);
+          return text || "";
+        } finally {
+          await worker.terminate();
+        }
+      })();
+
+      const rawOcrText = await Promise.race([ocrRun, ocrTimeout]);
+      ocrDetectedText = rawOcrText.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 500);
+
+      // Match against phishing phrase list
+      const foundOcrPhrases = OCR_PHRASES.filter(p => ocrDetectedText.includes(p));
+      ocrSignals = foundOcrPhrases;
+
+      // Trusted domains need 4+ OCR hits to register any score (very high bar)
+      const phraseCount = foundOcrPhrases.length;
+      const ocrThreshold = isTrustedBrand ? 4 : 1;
+
+      // Trusted domains: OCR signals are purely informational — zero score contribution
+      if (isTrustedBrand) {
+        ocrRiskScore = 0;
+        if (isDev) console.error(`[CIVIX] OCR: trusted domain — ${phraseCount} phrase(s) noted as informational only`);
+      } else {
+        if (phraseCount >= ocrThreshold) {
+          if (phraseCount >= 4)      ocrRiskScore = 40;
+          else if (phraseCount >= 2) ocrRiskScore = 25;
+          else                       ocrRiskScore = 10;
+          riskScore = Math.min(100, riskScore + ocrRiskScore);
+          if (ocrRiskScore >= 25 && riskLevel === "LOW") riskLevel = "MEDIUM";
+          if (ocrRiskScore >= 40 && riskLevel !== "HIGH") riskLevel = "HIGH";
+        }
+      }
+
+      if (isDev) console.error(`[CIVIX] OCR: ${phraseCount} phrase(s) found, ocrRiskScore=${ocrRiskScore}`);
+    } catch (ocrErr) {
+      // OCR failure is non-fatal — scan continues normally
+      if (isDev) console.error('[CIVIX] OCR failed (non-fatal):', ocrErr.message);
+    }
+
+    // ─── ABSOLUTE FINAL TRUST OVERRIDE ───────────────────────────────────────
+    // This runs LAST — after Gemini, Safe Browsing, fake login, and OCR.
+    // Nothing above can make a trusted domain return HIGH or MEDIUM
+    // except the two explicitly allowed exceptions:
+    //   1. Google Safe Browsing produced a confirmed malicious hit
+    //   2. A form on the trusted page posts credentials to a completely different external domain
+    if (isTrustedBrand) {
+      const hasSafeBrowsingHit = reasons.some(r => r.includes("Safe Browsing"));
+      const hasExternalExfiltration = loginSignals.some(s => s.includes("external domain"));
+      const isGenuineThreat = hasSafeBrowsingHit || hasExternalExfiltration;
+
+      if (!isGenuineThreat) {
+        // Lock to LOW: cap score, clear warning-level flags, reset riskLevel
+        riskScore = Math.min(riskScore, 25);
+        riskLevel = "LOW";
+        fakeLoginDetected = false;
+
+        // ── BADGE SANITIZATION ──────────────────────────────────────────────
+        // Replace all noisy heuristic signals with clean, user-friendly trust signals.
+        // Badges like "Suspicious URL", "Odd Domain Pattern", "Credential Harvesting"
+        // are technically correct for any login page but actively mislead users on
+        // official domains (accounts.google.com legitimately has a login form).
+        const NOISY_PATTERNS = [
+          "Suspicious URL", "URL path", "hyphens", "numbers", "long domain",
+          "password input", "credential", "Credential", "Email input",
+          "form language", "Urgency", "urgency", "Phishing content",
+          "hidden fields", "script", "external domain", "external link",
+          "Sensitive data", "Scam", "scam", "landing page", "readable text",
+          "Not using HTTPS",
+        ];
+
+        // Filter reasons to keep only non-noisy entries
+        const cleanReasons = reasons.filter(r =>
+          !NOISY_PATTERNS.some(p => r.includes(p))
+        );
+
+        // Ensure the canonical trust signal is always present
+        if (!cleanReasons.some(r => r.includes("Trusted") || r.includes("trusted"))) {
+          cleanReasons.push("Recognized trusted official domain");
+        }
+        // Add HTTPS signal only if the connection actually is HTTPS
+        if (url.startsWith("https://")) {
+          cleanReasons.push("Verified secure HTTPS connection");
+        }
+
+        // Replace the reasons array in-place
+        reasons.length = 0;
+        reasons.push(...cleanReasons);
+
+        // Clear credential harvesting and OCR signals — they are informational only
+        loginSignals.length = 0;
+        ocrSignals.length = 0;
+        ocrRiskScore = 0;
+        credentialRiskScore = 0;
+
+        explanation = `This is a trusted official domain:\n• Login forms and authentication pages on verified domains are expected and safe\n• No malicious signals were detected outside of normal login page behavior\n\nAlways ensure you are on the correct domain before entering credentials.`;
+        if (isDev) console.error(`[CIVIX] ABSOLUTE TRUST OVERRIDE applied — forced LOW + badge sanitization for trusted root`);
+      } else {
+        if (isDev) console.error(`[CIVIX] TRUST OVERRIDE skipped — genuine threat detected: SB=${hasSafeBrowsingHit}, ExternalExfil=${hasExternalExfiltration}`);
+      }
+    }
+
     const result = {
       screenshot: screenshotBuffer.toString("base64"),
       warning: isBlocked ? "Site blocked sandbox or prevented secure analysis" : null,
@@ -758,6 +898,9 @@ const TRUSTED_ROOTS = new Set([
         fakeLoginDetected,
         loginSignals,
         credentialRiskScore,
+        ocrDetectedText,
+        ocrSignals,
+        ocrRiskScore,
       }
     };
 

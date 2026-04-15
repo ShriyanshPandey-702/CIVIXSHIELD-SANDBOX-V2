@@ -19,6 +19,9 @@ type Analysis = {
   fakeLoginDetected?: boolean;
   loginSignals?: string[];
   credentialRiskScore?: number;
+  ocrDetectedText?: string;
+  ocrSignals?: string[];
+  ocrRiskScore?: number;
 };
 
 function getConfidence(level: string, score: number): number {
@@ -151,7 +154,20 @@ export default function SandboxPage() {
   } catch {}
 
   const confidence = analysis ? getConfidence(analysis.riskLevel, analysis.riskScore) : null;
-  const tags = analysis ? [...new Set(analysis.reasons.map(reasonToTag))] : [];
+
+  // Noisy tags that should never appear on a trusted LOW-risk domain
+  const SUPPRESSED_FOR_TRUSTED = new Set([
+    "Suspicious URL", "Odd Domain Pattern", "No HTTPS", "Credential Harvesting Form",
+    "External Form Action", "Suspicious Scripts", "Hidden Fields", "Sensitive Data Keywords",
+    "Suspicious Form Language", "Phishing Phrases Found", "Urgency Language",
+    "Login Form Detected", "Brand Impersonation", "Typosquatting", "Sandbox Blocked",
+  ]);
+  const isTrustedLow = !!(analysis?.isTrustedBrand && analysis?.riskLevel === "LOW");
+
+  const rawTags = analysis ? [...new Set(analysis.reasons.map(reasonToTag))] : [];
+  const tags = isTrustedLow
+    ? rawTags.filter(tag => !SUPPRESSED_FOR_TRUSTED.has(tag))
+    : rawTags;
 
   return (
     <>
@@ -321,7 +337,9 @@ export default function SandboxPage() {
                   {analysis.riskLevel}
                 </div>
                 {analysis.isTrustedBrand && (
-                  <div style={{ padding: "4px 14px", borderRadius: "4px", background: "#00e5ff11", border: "1px solid #00e5ff44", color: "#00e5ff", fontSize: "11px", fontFamily: "'Share Tech Mono', monospace" }}>✓ TRUSTED BRAND</div>
+                  <div style={{ padding: "4px 14px", borderRadius: "4px", background: "#00e5ff11", border: "1px solid #00e5ff44", color: "#00e5ff", fontSize: "11px", fontFamily: "'Share Tech Mono', monospace" }}>
+                    ✓ {analysis.loginSignals && analysis.loginSignals.length > 0 ? "Trusted Official Login Page" : "Trusted Brand"}
+                  </div>
                 )}
                 {analysis.fakeLoginDetected && (
                   <div style={{
@@ -413,6 +431,39 @@ export default function SandboxPage() {
                   {analysis.credentialRiskScore !== undefined && (
                     <div style={{ marginTop: "10px", fontFamily: "'Share Tech Mono', monospace", fontSize: "11px", color: "#ff2d5566" }}>
                       Credential Risk Sub-Score: <span style={{ color: "#ff2d55" }}>{analysis.credentialRiskScore}/170</span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* OCR Screen Text Alerts */}
+              {analysis.ocrSignals && analysis.ocrSignals.length > 0 && (
+                <div style={{ borderTop: "1px solid #ffc30033", paddingTop: "14px" }}>
+                  <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: "10px", color: "#ffc30088", letterSpacing: "2px", marginBottom: "10px" }}>OCR SCREEN TEXT ALERTS</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginBottom: "12px" }}>
+                    {analysis.ocrSignals.map((phrase, i) => (
+                      <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#ffc300", flexShrink: 0, marginTop: "2px" }}>🔍</span>
+                        <span style={{ color: "#b0b0b0", fontSize: "13px", lineHeight: "1.5", textTransform: "capitalize" }}>{phrase}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {analysis.ocrDetectedText && (
+                    <div style={{
+                      background: "#0a0a12", border: "1px solid #ffc30033",
+                      borderRadius: "6px", padding: "10px 14px",
+                    }}>
+                      <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: "10px", color: "#ffc30066", letterSpacing: "2px", marginBottom: "6px" }}>EXTRACTED TEXT PREVIEW</div>
+                      <p style={{
+                        color: "#666", fontSize: "12px",
+                        fontFamily: "'Share Tech Mono', monospace",
+                        lineHeight: "1.6", wordBreak: "break-word",
+                      }}>{analysis.ocrDetectedText}</p>
+                    </div>
+                  )}
+                  {analysis.ocrRiskScore !== undefined && analysis.ocrRiskScore > 0 && (
+                    <div style={{ marginTop: "10px", fontFamily: "'Share Tech Mono', monospace", fontSize: "11px", color: "#ffc30066" }}>
+                      OCR Risk Score Added: <span style={{ color: "#ffc300" }}>+{analysis.ocrRiskScore}</span>
                     </div>
                   )}
                 </div>
