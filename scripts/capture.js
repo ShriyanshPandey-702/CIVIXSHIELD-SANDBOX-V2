@@ -146,6 +146,76 @@ const TRUSTED_ROOTS = new Set([
 
     // Stop any remaining JS execution before closing
     try { await page.evaluate(() => window.stop()); } catch(e) {}
+
+    // ── LIVE DOM: FAKE LOGIN FORM SIGNALS ─────────────────────────────────────
+    // Runs while page is still live so we can inspect computed styles.
+    // Lightweight — uses no external calls, finishes in <50ms.
+    let domLoginSignals = {};
+    try {
+      domLoginSignals = await page.evaluate(() => {
+        const inputs = Array.from(document.querySelectorAll('input'));
+        const forms  = Array.from(document.querySelectorAll('form'));
+
+        // 1. Password field count
+        const passwordFields = inputs.filter(i => i.type === 'password');
+
+        // 2. Email / username fields
+        const credFields = inputs.filter(i =>
+          i.type === 'email' ||
+          /user(name)?|email|login|account/i.test(i.name + i.id + i.placeholder)
+        );
+
+        // 3. Suspicious submit buttons/links
+        const SUSPICIOUS_BTNS = ['login','sign in','verify','continue','unlock','confirm account','secure login'];
+        const allClickables = [
+          ...Array.from(document.querySelectorAll('button')),
+          ...Array.from(document.querySelectorAll('input[type="submit"]')),
+          ...Array.from(document.querySelectorAll('a')),
+        ];
+        const suspiciousButtons = allClickables.filter(el => {
+          const t = (el.textContent || el.value || '').toLowerCase().trim();
+          return SUSPICIOUS_BTNS.some(k => t.includes(k));
+        });
+
+        // 4. Hidden / offscreen forms
+        const hiddenForms = forms.filter(f => {
+          const s = window.getComputedStyle(f);
+          const r = f.getBoundingClientRect();
+          return s.display === 'none' || s.visibility === 'hidden' ||
+                 s.opacity === '0' || r.top > 9000 || r.left < -500;
+        });
+
+        // 5. Forms posting to external domain
+        const currentHost = location.hostname.replace(/^www\./, '');
+        const externalActions = forms.filter(f => {
+          try {
+            const action = f.action;
+            if (!action || action === '' || action.startsWith('javascript')) return false;
+            const actionHost = new URL(action, location.href).hostname.replace(/^www\./, '');
+            return actionHost !== currentHost && actionHost !== '';
+          } catch { return false; }
+        });
+
+        // 6. Brand words in visible page text
+        const bodyText = (document.body?.innerText || '').toLowerCase();
+        const BRANDS = ['google','microsoft','paypal','amazon','facebook','instagram','bank','apple','netflix','sbi','hdfc','icici'];
+        const brandsFound = BRANDS.filter(b => bodyText.includes(b));
+
+        return {
+          passwordFieldCount: passwordFields.length,
+          credFieldCount: credFields.length,
+          suspiciousButtonCount: suspiciousButtons.length,
+          hiddenFormCount: hiddenForms.length,
+          externalActionCount: externalActions.length,
+          brandsInPageText: brandsFound,
+          pageTextLength: bodyText.length,
+          hasLoginForm: passwordFields.length > 0,
+        };
+      });
+    } catch(domErr) {
+      if (isDev) console.error('[CIVIX] DOM login scan failed:', domErr.message);
+    }
+
     await browser.close();
 
     // ─── ANALYSIS ENGINE ─────────────────────────────────────────────────────
@@ -605,6 +675,76 @@ const TRUSTED_ROOTS = new Set([
       explanation = `This website appears legitimate:\n• Domain and content are consistent with a recognized trusted brand\n• No strong phishing indicators were detected\n\nHowever, always verify URLs before sharing sensitive information.`;
     }
 
+    // ─── FAKE LOGIN FORM DETECTION ENGINE ────────────────────────────────────
+    // Applied AFTER trusted safety net so trusted sites are fully immune.
+    const loginSignals = [];
+    let credentialRiskScore = 0;
+    let fakeLoginDetected = false;
+
+    if (!isTrustedBrand && domLoginSignals && domLoginSignals.hasLoginForm !== undefined) {
+      const d = domLoginSignals;
+
+      // Rule 1: Password field exists
+      if (d.passwordFieldCount >= 1) {
+        credentialRiskScore += 35;
+        loginSignals.push("Password input field detected on page");
+      }
+
+      // Rule 2: Email/username + password combo
+      if (d.credFieldCount >= 1 && d.passwordFieldCount >= 1) {
+        credentialRiskScore += 25;
+        loginSignals.push("Email/username and password fields present together (credential combo)");
+      }
+
+      // Rule 3: Suspicious submit buttons
+      if (d.suspiciousButtonCount >= 1) {
+        credentialRiskScore += 15;
+        loginSignals.push(`Suspicious authentication button detected (e.g. 'Login', 'Verify', 'Unlock')`);
+      }
+
+      // Rule 4: Brand word in page but domain not official — brand/login mismatch
+      if (d.brandsInPageText && d.brandsInPageText.length > 0 && !isTrustedBrand) {
+        const brandList = d.brandsInPageText.slice(0, 3).join(', ');
+        credentialRiskScore += 40;
+        loginSignals.push(`Brand names detected in page content (${brandList}) but domain is not an official source`);
+      }
+
+      // Rule 5: Hidden / obfuscated forms
+      if (d.hiddenFormCount >= 1) {
+        credentialRiskScore += 20;
+        loginSignals.push(`${d.hiddenFormCount} hidden or offscreen form(s) detected`);
+      }
+
+      // Rule 6: Multiple password fields
+      if (d.passwordFieldCount >= 2) {
+        credentialRiskScore += 15;
+        loginSignals.push(`Multiple password fields (${d.passwordFieldCount}) — possible credential cloning`);
+      }
+
+      // Rule 7: External form action
+      if (d.externalActionCount >= 1) {
+        credentialRiskScore += 35;
+        loginSignals.push("Form posts credentials to an external domain (data exfiltration)");
+      }
+
+      // Rule 8: Thin credential trap
+      if (d.hasLoginForm && d.pageTextLength < 1500) {
+        credentialRiskScore += 20;
+        loginSignals.push("Login form on a page with very little content (credential trap pattern)");
+      }
+
+      // Threshold: flag if credential sub-score is high enough
+      fakeLoginDetected = credentialRiskScore >= 50;
+
+      // Merge into main risk score (capped contribution of 60 to avoid over-inflation)
+      if (fakeLoginDetected) {
+        const contribution = Math.min(60, credentialRiskScore);
+        riskScore = Math.min(100, riskScore + contribution);
+        if (riskLevel === "LOW") riskLevel = "MEDIUM";
+        if (credentialRiskScore >= 80 && riskLevel !== "HIGH") riskLevel = "HIGH";
+      }
+    }
+
     const result = {
       screenshot: screenshotBuffer.toString("base64"),
       warning: isBlocked ? "Site blocked sandbox or prevented secure analysis" : null,
@@ -614,7 +754,10 @@ const TRUSTED_ROOTS = new Set([
         reasons,
         explanation,
         isBlocked,
-        isTrustedBrand
+        isTrustedBrand,
+        fakeLoginDetected,
+        loginSignals,
+        credentialRiskScore,
       }
     };
 

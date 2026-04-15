@@ -16,6 +16,9 @@ type Analysis = {
   explanation: string;
   isBlocked?: boolean;
   isTrustedBrand?: boolean;
+  fakeLoginDetected?: boolean;
+  loginSignals?: string[];
+  credentialRiskScore?: number;
 };
 
 function getConfidence(level: string, score: number): number {
@@ -320,6 +323,15 @@ export default function SandboxPage() {
                 {analysis.isTrustedBrand && (
                   <div style={{ padding: "4px 14px", borderRadius: "4px", background: "#00e5ff11", border: "1px solid #00e5ff44", color: "#00e5ff", fontSize: "11px", fontFamily: "'Share Tech Mono', monospace" }}>✓ TRUSTED BRAND</div>
                 )}
+                {analysis.fakeLoginDetected && (
+                  <div style={{
+                    padding: "4px 14px", borderRadius: "4px",
+                    background: "#ff2d5522", border: "1px solid #ff2d5588",
+                    color: "#ff2d55", fontSize: "11px",
+                    fontFamily: "'Share Tech Mono', monospace",
+                    fontWeight: 700,
+                  }}>⚠ Credential Harvesting Page Suspected</div>
+                )}
                 {confidence !== null && (
                   <div style={{ marginLeft: "auto", fontFamily: "'Share Tech Mono', monospace", fontSize: "12px", color: "#555" }}>
                     Confidence: <span style={{ color: riskColor(analysis.riskLevel) }}>{confidence}%</span>
@@ -383,6 +395,26 @@ export default function SandboxPage() {
                       );
                     })}
                   </div>
+                </div>
+              )}
+
+              {/* Credential Harvesting Signals */}
+              {analysis.fakeLoginDetected && analysis.loginSignals && analysis.loginSignals.length > 0 && (
+                <div style={{ borderTop: "1px solid #ff2d5533", paddingTop: "14px" }}>
+                  <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: "10px", color: "#ff2d5588", letterSpacing: "2px", marginBottom: "10px" }}>CREDENTIAL HARVESTING SIGNALS</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                    {analysis.loginSignals.map((signal, i) => (
+                      <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: "8px" }}>
+                        <span style={{ color: "#ff2d55", flexShrink: 0, marginTop: "2px" }}>⚠</span>
+                        <span style={{ color: "#b0b0b0", fontSize: "13px", lineHeight: "1.5" }}>{signal}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {analysis.credentialRiskScore !== undefined && (
+                    <div style={{ marginTop: "10px", fontFamily: "'Share Tech Mono', monospace", fontSize: "11px", color: "#ff2d5566" }}>
+                      Credential Risk Sub-Score: <span style={{ color: "#ff2d55" }}>{analysis.credentialRiskScore}/170</span>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
