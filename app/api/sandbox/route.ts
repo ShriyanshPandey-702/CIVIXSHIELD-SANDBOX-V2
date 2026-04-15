@@ -16,7 +16,10 @@ function runCaptureScript(url: string): Promise<string> {
     const scriptPath = path.join(process.cwd(), "scripts", "capture.js");
     
     // We increase maxBuffer because base-64 image buffers can be several Megabytes
-    execFile("node", [scriptPath, url], { maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
+    execFile("node", [scriptPath, url], { 
+      maxBuffer: 1024 * 1024 * 10,
+      env: process.env // Strictly pass Next.js loaded API keys to script
+    }, (error, stdout, stderr) => {
       if (error) {
         return reject(new Error(stderr || error.message || "Failed to capture screenshot"));
       }

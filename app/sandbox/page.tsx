@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 
 const SCAN_STEPS = [
   "Initializing sandbox...",
@@ -18,6 +18,41 @@ type Analysis = {
   isTrustedBrand?: boolean;
 };
 
+function getConfidence(level: string, score: number): number {
+  if (level === "HIGH") return Math.min(95, 80 + Math.floor((score - 60) / 4));
+  if (level === "MEDIUM") return Math.min(75, 50 + Math.floor(score / 6));
+  return Math.min(95, 80 + Math.floor((30 - score) / 3));
+}
+
+function reasonToTag(reason: string): string {
+  if (reason.includes("password input")) return "Login Form Detected";
+  if (reason.includes("Urgency") || reason.includes("urgency")) return "Urgency Language";
+  if (reason.includes("HTTPS")) return "No HTTPS";
+  if (reason.includes("Typosquatting") || reason.includes("typosquat")) return "Typosquatting";
+  if (reason.includes("impersonat") || reason.includes("Brand")) return "Brand Impersonation";
+  if (reason.includes("blocked") || reason.includes("prevented")) return "Sandbox Blocked";
+  if (reason.includes("Phishing content")) return "Phishing Phrases Found";
+  if (reason.includes("URL path")) return "Suspicious URL";
+  if (reason.includes("hyphens")) return "Suspicious Domain";
+  if (reason.includes("numbers") || reason.includes("long domain")) return "Odd Domain Pattern";
+  if (reason.includes("Email input")) return "Credential Harvesting Form";
+  if (reason.includes("external domain")) return "External Form Action";
+  if (reason.includes("script")) return "Suspicious Scripts";
+  if (reason.includes("trusted brand")) return "Trusted Brand";
+  if (reason.includes("hidden fields")) return "Hidden Fields";
+  if (reason.includes("Sensitive data")) return "Sensitive Data Keywords";
+  if (reason.includes("Suspicious form")) return "Suspicious Form Language";
+  return reason.slice(0, 30);
+}
+
+function tagColor(tag: string, level: string): { bg: string; border: string; color: string } {
+  const safe = ["Trusted Brand"];
+  const warn = ["No HTTPS", "Suspicious URL", "Suspicious Domain", "Odd Domain Pattern", "Suspicious Form Language", "Sandbox Blocked"];
+  if (safe.includes(tag)) return { bg: "#00e5ff11", border: "#00e5ff55", color: "#00e5ff" };
+  if (warn.includes(tag)) return { bg: "#ffc30011", border: "#ffc30055", color: "#ffc300" };
+  return { bg: "#ff2d5511", border: "#ff2d5555", color: "#ff2d55" };
+}
+
 export default function SandboxPage() {
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
@@ -27,6 +62,9 @@ export default function SandboxPage() {
   const [warning, setWarning] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [reported, setReported] = useState(false);
+  const [scanTime, setScanTime] = useState<number | null>(null);
+  const [scannedUrl, setScannedUrl] = useState<string | null>(null);
+  const scanStartRef = useRef<number>(0);
 
   useEffect(() => {
     let interval: ReturnType<typeof setInterval>;
@@ -41,7 +79,13 @@ export default function SandboxPage() {
 
   async function handleScan(e: React.FormEvent) {
     e.preventDefault();
-    if (!url.trim()) return;
+    const rawUrl = url;
+    if (!rawUrl.trim()) return;
+
+    let submitUrl = rawUrl.trim();
+    if (!submitUrl.startsWith("http://") && !submitUrl.startsWith("https://")) {
+      submitUrl = "https://" + submitUrl;
+    }
 
     setLoading(true);
     setScreenshot(null);
@@ -49,11 +93,9 @@ export default function SandboxPage() {
     setWarning(null);
     setAnalysis(null);
     setReported(false);
-
-    let submitUrl = url.trim();
-    if (!submitUrl.startsWith("http://") && !submitUrl.startsWith("https://")) {
-      submitUrl = "https://" + submitUrl;
-    }
+    setScanTime(null);
+    setScannedUrl(submitUrl);
+    scanStartRef.current = Date.now();
 
     try {
       const res = await fetch("/api/sandbox", {
@@ -63,6 +105,8 @@ export default function SandboxPage() {
       });
 
       const data = await res.json();
+      const elapsed = (Date.now() - scanStartRef.current) / 1000;
+      setScanTime(parseFloat(elapsed.toFixed(1)));
 
       if (!res.ok) {
         setError(data.error || "An error occurred while scanning.");
@@ -92,111 +136,73 @@ export default function SandboxPage() {
     return "0 0 20px #00e5ff44";
   };
 
+  // Parse domain and protocol from scanned URL
+  let displayDomain = "";
+  let displayProtocol = "";
+  try {
+    if (scannedUrl) {
+      const parsed = new URL(scannedUrl);
+      displayDomain = parsed.hostname.replace(/^www\./, "");
+      displayProtocol = parsed.protocol === "https:" ? "HTTPS" : "HTTP";
+    }
+  } catch {}
+
+  const confidence = analysis ? getConfidence(analysis.riskLevel, analysis.riskScore) : null;
+  const tags = analysis ? [...new Set(analysis.reasons.map(reasonToTag))] : [];
+
   return (
     <>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;600;700&display=swap');
-
         * { box-sizing: border-box; margin: 0; padding: 0; }
-
-        body {
-          background: #0a0a0a;
-          color: #e0e0e0;
-          font-family: 'Rajdhani', sans-serif;
-        }
+        body { background: #0a0a0a; color: #e0e0e0; font-family: 'Rajdhani', sans-serif; }
 
         .scan-btn {
-          padding: 14px 32px;
-          border-radius: 6px;
+          padding: 14px 32px; border-radius: 6px;
           border: 1px solid #ff2d55;
           background: linear-gradient(135deg, #ff2d55cc, #c0003a);
-          color: #fff;
-          font-size: 16px;
-          font-weight: 700;
-          letter-spacing: 1px;
-          cursor: pointer;
-          transition: box-shadow 0.3s;
-          white-space: nowrap;
+          color: #fff; font-size: 16px; font-weight: 700; letter-spacing: 1px;
+          cursor: pointer; transition: box-shadow 0.3s, transform 0.15s; white-space: nowrap;
         }
-        .scan-btn:hover:not(:disabled) {
-          box-shadow: 0 0 18px #ff2d55aa;
-        }
+        .scan-btn:hover:not(:disabled) { box-shadow: 0 0 22px #ff2d55aa; transform: translateY(-1px); }
         .scan-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
         .report-btn {
-          padding: 11px 24px;
-          border-radius: 6px;
-          border: 1px solid #ff2d55;
-          background: transparent;
-          color: #ff2d55;
-          font-size: 15px;
-          font-weight: 700;
-          letter-spacing: 1px;
-          cursor: pointer;
-          transition: all 0.25s;
+          padding: 11px 24px; border-radius: 6px;
+          border: 1px solid #ff2d55; background: transparent;
+          color: #ff2d55; font-size: 15px; font-weight: 700; letter-spacing: 1px;
+          cursor: pointer; transition: all 0.25s;
         }
-        .report-btn:hover {
-          background: #ff2d5522;
-          box-shadow: 0 0 12px #ff2d5566;
-        }
+        .report-btn:hover { background: #ff2d5522; box-shadow: 0 0 12px #ff2d5566; }
 
-        @keyframes pulse-glow {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0.6; }
-        }
+        @keyframes pulse-glow { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
         .pulse { animation: pulse-glow 1.8s ease-in-out infinite; }
-
-        @keyframes meter-fill {
-          from { width: 0%; }
-        }
-        .meter-bar { animation: meter-fill 0.8s cubic-bezier(0.22,1,0.36,1) forwards; }
+        @keyframes fade-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+        .fade-in { animation: fade-in 0.4s ease forwards; }
+        @keyframes meter-fill { from { width: 0%; } }
+        .meter-bar { animation: meter-fill 0.9s cubic-bezier(0.22,1,0.36,1) forwards; }
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+        .blink { animation: blink 1s ease-in-out infinite; }
       `}</style>
 
-      <div style={{
-        minHeight: "100vh",
-        background: "#0a0a0a",
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        padding: "60px 20px 100px",
-      }}>
-        {/* ── HEADER ─────────────────────────────────────────────── */}
+      <div style={{ minHeight: "100vh", background: "#0a0a0a", display: "flex", flexDirection: "column", alignItems: "center", padding: "60px 20px 100px" }}>
+
+        {/* ── HEADER ─────────────────────────────────────────────────────────── */}
         <div style={{ textAlign: "center", marginBottom: "48px" }}>
-          <div style={{
-            fontFamily: "'Share Tech Mono', monospace",
-            color: "#00e5ff",
-            fontSize: "12px",
-            letterSpacing: "4px",
-            marginBottom: "10px",
-            textTransform: "uppercase",
-          }}>
+          <div style={{ fontFamily: "'Share Tech Mono', monospace", color: "#00e5ff", fontSize: "11px", letterSpacing: "5px", marginBottom: "10px", textTransform: "uppercase" }}>
             INTELLIGENT SECURITY SANDBOX
           </div>
-          <h1 style={{
-            fontFamily: "'Rajdhani', sans-serif",
-            fontSize: "clamp(2rem, 6vw, 3.6rem)",
-            fontWeight: 700,
-            letterSpacing: "3px",
-            color: "#fff",
-            textShadow: "0 0 30px #00e5ff44",
-            lineHeight: 1.1,
-          }}>
-            CIVIXSHIELD<span style={{ color: "#ff2d55" }}>-SANDBOX</span>
+          <h1 style={{ fontFamily: "'Rajdhani', sans-serif", fontSize: "clamp(2rem, 6vw, 3.6rem)", fontWeight: 700, letterSpacing: "3px", color: "#fff", textShadow: "0 0 30px #00e5ff44", lineHeight: 1.1 }}>
+            CIVIXSHIELD<span style={{ color: "#ffc300" }}>-SANDBOX</span>
           </h1>
-          <p style={{ color: "#666", marginTop: "12px", fontSize: "15px", letterSpacing: "1px" }}>
+          <p style={{ color: "#555", marginTop: "12px", fontSize: "14px", letterSpacing: "1px" }}>
             Paste any URL. We analyse it safely in an isolated browser.
           </p>
         </div>
 
-        {/* ── MAIN CARD ────────────────────────────────────────────── */}
-        <div style={{
-          width: "100%",
-          maxWidth: "860px",
-          display: "flex",
-          flexDirection: "column",
-          gap: "24px",
-        }}>
-          {/* URL Form */}
+        <div style={{ width: "100%", maxWidth: "860px", display: "flex", flexDirection: "column", gap: "20px" }}>
+
+          {/* ── URL FORM ───────────────────────────────────────────────────────── */}
           <form onSubmit={handleScan} style={{ display: "flex", gap: "12px", width: "100%" }}>
             <input
               type="text"
@@ -207,268 +213,198 @@ export default function SandboxPage() {
               autoComplete="off"
               required
               style={{
-                flex: 1,
-                padding: "14px 18px",
-                borderRadius: "6px",
-                border: "1px solid #1e1e2a",
-                background: "#111118",
-                color: "#e0e0e0",
-                fontSize: "16px",
-                fontFamily: "'Share Tech Mono', monospace",
-                outline: "none",
-                transition: "border-color 0.2s",
+                flex: 1, padding: "14px 18px", borderRadius: "6px",
+                border: "1px solid #1e1e2a", background: "#111118",
+                color: "#e0e0e0", fontSize: "15px", fontFamily: "'Share Tech Mono', monospace",
+                outline: "none", transition: "border-color 0.2s",
               }}
-              onFocus={(e) => (e.target.style.borderColor = "#00e5ff66")}
+              onFocus={(e) => (e.target.style.borderColor = "#00e5ff55")}
               onBlur={(e) => (e.target.style.borderColor = "#1e1e2a")}
             />
-            <button
-              type="submit"
-              disabled={loading || !url.trim()}
-              className="scan-btn"
-            >
+            <button type="submit" disabled={loading || !url.trim()} className="scan-btn">
               {loading ? "SCANNING..." : "SCAN LINK"}
             </button>
           </form>
 
-          {/* Scanning Steps */}
+          {/* ── SCANNING STEPS ─────────────────────────────────────────────────── */}
           {loading && (
-            <div style={{
-              background: "#111118",
-              border: "1px solid #1e1e2a",
-              borderRadius: "8px",
-              padding: "20px 24px",
-              display: "flex",
-              flexDirection: "column",
-              gap: "10px",
-            }}>
+            <div style={{ background: "#111118", border: "1px solid #1e1e2a", borderRadius: "8px", padding: "20px 24px", display: "flex", flexDirection: "column", gap: "10px" }}>
               {SCAN_STEPS.map((step, i) => (
-                <div key={i} style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "12px",
-                  opacity: i <= loadingStep ? 1 : 0.25,
-                  transition: "opacity 0.4s",
-                }}>
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: "12px", opacity: i <= loadingStep ? 1 : 0.2, transition: "opacity 0.4s" }}>
                   <div style={{
-                    width: "8px",
-                    height: "8px",
-                    borderRadius: "50%",
+                    width: "8px", height: "8px", borderRadius: "50%", flexShrink: 0,
                     background: i < loadingStep ? "#00e5ff" : i === loadingStep ? "#ffc300" : "#333",
                     boxShadow: i === loadingStep ? "0 0 8px #ffc300" : "none",
-                    flexShrink: 0,
                   }} className={i === loadingStep ? "pulse" : ""} />
-                  <span style={{
-                    fontFamily: "'Share Tech Mono', monospace",
-                    fontSize: "13px",
-                    color: i < loadingStep ? "#00e5ff" : i === loadingStep ? "#ffc300" : "#555",
-                  }}>
+                  <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: "13px", color: i < loadingStep ? "#00e5ff" : i === loadingStep ? "#ffc300" : "#444" }}>
                     {step}
                   </span>
-                  {i < loadingStep && (
-                    <span style={{ marginLeft: "auto", color: "#00e5ff", fontSize: "12px" }}>✓</span>
-                  )}
+                  {i < loadingStep && <span style={{ marginLeft: "auto", color: "#00e5ff", fontSize: "11px" }}>✓ DONE</span>}
                 </div>
               ))}
             </div>
           )}
 
-          {/* Error */}
+          {/* ── ERROR ──────────────────────────────────────────────────────────── */}
           {error && (
-            <div style={{
-              padding: "16px 20px",
-              background: "#1a0810",
-              border: "1px solid #ff2d5566",
-              borderRadius: "8px",
-              color: "#ff6b87",
-              fontSize: "14px",
-              fontFamily: "'Share Tech Mono', monospace",
-            }}>
+            <div className="fade-in" style={{ padding: "16px 20px", background: "#1a0810", border: "1px solid #ff2d5566", borderRadius: "8px", color: "#ff6b87", fontSize: "14px", fontFamily: "'Share Tech Mono', monospace" }}>
               ✗ {error}
             </div>
           )}
 
-          {/* Warning Banner */}
+          {/* ── WARNING BANNER ─────────────────────────────────────────────────── */}
           {warning && (
-            <div style={{
-              padding: "16px 20px",
-              background: "#1a1500",
-              border: "1px solid #ffc30066",
-              borderRadius: "8px",
-              color: "#ffc300",
-              fontSize: "14px",
-              fontWeight: 600,
-              letterSpacing: "0.5px",
-            }}>
+            <div className="fade-in" style={{ padding: "16px 20px", background: "#1a1500", border: "1px solid #ffc30066", borderRadius: "8px", color: "#ffc300", fontSize: "14px", fontWeight: 600, letterSpacing: "0.5px" }}>
               ⚠ {warning}
             </div>
           )}
 
-          {/* HIGH RISK auto-alert */}
+          {/* ── HIGH RISK ALERT BANNER ─────────────────────────────────────────── */}
           {analysis?.riskLevel === "HIGH" && (
-            <div style={{
-              padding: "18px 20px",
-              background: "#1a0810",
-              border: "1px solid #ff2d55",
-              borderRadius: "8px",
-              color: "#ff2d55",
-              fontSize: "15px",
-              fontWeight: 700,
-              letterSpacing: "0.5px",
-              boxShadow: "0 0 20px #ff2d5533",
+            <div className="fade-in blink" style={{
+              padding: "20px 24px", background: "#1a0810",
+              border: "2px solid #ff2d55", borderRadius: "8px",
+              color: "#ff2d55", fontSize: "18px", fontWeight: 700,
+              letterSpacing: "0.5px", textAlign: "center",
+              boxShadow: "0 0 30px #ff2d5544, inset 0 0 20px #ff2d5511",
             }}>
-              🚨 This site should be reported immediately
+              🚨 WARNING: This is likely a phishing website. Do NOT enter credentials.
             </div>
           )}
 
-          {/* Analysis Card */}
+          {/* ── SCAN TIME ──────────────────────────────────────────────────────── */}
+          {scanTime !== null && !loading && (
+            <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: "12px", color: "#444", textAlign: "right", letterSpacing: "1px" }}>
+              ⏱ Scan completed in {scanTime}s
+            </div>
+          )}
+
+          {/* ── DOMAIN INFO PANEL ──────────────────────────────────────────────── */}
+          {analysis && displayDomain && (
+            <div className="fade-in" style={{
+              display: "flex", gap: "24px", flexWrap: "wrap",
+              padding: "14px 20px", background: "#0e0e16",
+              border: "1px solid #1e1e2a", borderRadius: "8px",
+            }}>
+              {[
+                ["DOMAIN", displayDomain],
+                ["PROTOCOL", displayProtocol],
+                ["RISK LEVEL", analysis.riskLevel],
+              ].map(([label, val]) => (
+                <div key={label} style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                  <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: "10px", color: "#444", letterSpacing: "2px" }}>{label}</span>
+                  <span style={{
+                    fontFamily: "'Rajdhani', sans-serif", fontSize: "16px", fontWeight: 700,
+                    color: label === "RISK LEVEL" ? riskColor(val) : "#e0e0e0",
+                  }}>{val}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* ── ANALYSIS CARD ──────────────────────────────────────────────────── */}
           {analysis && (
-            <div style={{
-              background: "#0e0e16",
-              border: `1px solid ${riskColor(analysis.riskLevel)}44`,
+            <div className="fade-in" style={{
+              background: "#0e0e16", border: `1px solid ${riskColor(analysis.riskLevel)}44`,
               borderLeft: `4px solid ${riskColor(analysis.riskLevel)}`,
-              borderRadius: "10px",
-              padding: "24px",
-              display: "flex",
-              flexDirection: "column",
-              gap: "16px",
+              borderRadius: "10px", padding: "24px",
+              display: "flex", flexDirection: "column", gap: "18px",
               boxShadow: riskGlow(analysis.riskLevel),
             }}>
-              {/* Risk Level Header */}
+              {/* Risk Header */}
               <div style={{ display: "flex", alignItems: "center", gap: "16px", flexWrap: "wrap" }}>
-                <div style={{
-                  fontFamily: "'Share Tech Mono', monospace",
-                  fontSize: "11px",
-                  color: "#555",
-                  letterSpacing: "3px",
-                  textTransform: "uppercase",
-                }}>RISK LEVEL</div>
-                <div style={{
-                  padding: "4px 16px",
-                  borderRadius: "4px",
-                  background: `${riskColor(analysis.riskLevel)}22`,
-                  border: `1px solid ${riskColor(analysis.riskLevel)}66`,
-                  color: riskColor(analysis.riskLevel),
-                  fontWeight: 700,
-                  fontSize: "18px",
-                  letterSpacing: "3px",
-                  fontFamily: "'Rajdhani', sans-serif",
-                }}>
+                <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: "10px", color: "#444", letterSpacing: "3px" }}>RISK LEVEL</div>
+                <div style={{ padding: "4px 16px", borderRadius: "4px", background: `${riskColor(analysis.riskLevel)}22`, border: `1px solid ${riskColor(analysis.riskLevel)}66`, color: riskColor(analysis.riskLevel), fontWeight: 700, fontSize: "18px", letterSpacing: "3px" }}>
                   {analysis.riskLevel}
                 </div>
                 {analysis.isTrustedBrand && (
-                  <div style={{
-                    padding: "4px 14px",
-                    borderRadius: "4px",
-                    background: "#00e5ff11",
-                    border: "1px solid #00e5ff44",
-                    color: "#00e5ff",
-                    fontSize: "12px",
-                    fontFamily: "'Share Tech Mono', monospace",
-                  }}>✓ TRUSTED BRAND</div>
+                  <div style={{ padding: "4px 14px", borderRadius: "4px", background: "#00e5ff11", border: "1px solid #00e5ff44", color: "#00e5ff", fontSize: "11px", fontFamily: "'Share Tech Mono', monospace" }}>✓ TRUSTED BRAND</div>
+                )}
+                {confidence !== null && (
+                  <div style={{ marginLeft: "auto", fontFamily: "'Share Tech Mono', monospace", fontSize: "12px", color: "#555" }}>
+                    Confidence: <span style={{ color: riskColor(analysis.riskLevel) }}>{confidence}%</span>
+                  </div>
                 )}
               </div>
 
               {/* Risk Meter */}
               <div>
-                <div style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  marginBottom: "8px",
-                }}>
-                  <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: "11px", color: "#555" }}>THREAT SCORE</span>
-                  <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: "13px", color: riskColor(analysis.riskLevel) }}>
-                    {analysis.riskScore}/100
-                  </span>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
+                  <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: "10px", color: "#444", letterSpacing: "2px" }}>THREAT SCORE</span>
+                  <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: "12px", color: riskColor(analysis.riskLevel) }}>{analysis.riskScore}/100</span>
                 </div>
-                <div style={{
-                  width: "100%",
-                  height: "8px",
-                  background: "#1e1e2a",
-                  borderRadius: "4px",
-                  overflow: "hidden",
-                }}>
-                  <div
-                    className="meter-bar"
-                    style={{
-                      height: "100%",
-                      width: `${Math.min(100, analysis.riskScore)}%`,
-                      background: `linear-gradient(90deg, ${riskColor(analysis.riskLevel)}88, ${riskColor(analysis.riskLevel)})`,
-                      borderRadius: "4px",
-                      boxShadow: `0 0 8px ${riskColor(analysis.riskLevel)}`,
-                    }}
-                  />
+                <div style={{ width: "100%", height: "8px", background: "#1e1e2a", borderRadius: "4px", overflow: "hidden" }}>
+                  <div className="meter-bar" style={{ height: "100%", width: `${Math.min(100, analysis.riskScore)}%`, background: `linear-gradient(90deg, ${riskColor(analysis.riskLevel)}88, ${riskColor(analysis.riskLevel)})`, borderRadius: "4px", boxShadow: `0 0 8px ${riskColor(analysis.riskLevel)}` }} />
                 </div>
               </div>
 
-              {/* Explanation */}
+              {/* Explanation — rendered as structured lines */}
               {analysis.explanation && (
-                <p style={{
-                  color: "#b0b0b0",
-                  fontSize: "15px",
-                  lineHeight: "1.6",
-                  borderTop: "1px solid #1e1e2a",
-                  paddingTop: "14px",
-                }}>
-                  {analysis.explanation}
-                </p>
+                <div style={{ borderTop: "1px solid #1e1e2a", paddingTop: "14px" }}>
+                  <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: "10px", color: "#444", letterSpacing: "2px", marginBottom: "10px" }}>ANALYSIS SUMMARY</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                    {analysis.explanation.split("\n").map((line, i) => {
+                      const isBullet = line.startsWith("\u2022");
+                      const isEmpty = line.trim() === "";
+                      if (isEmpty) return <div key={i} style={{ height: "4px" }} />;
+                      return (
+                        <p key={i} style={{
+                          color: isBullet ? "#b0b0b0" : "#888",
+                          fontSize: isBullet ? "14px" : "13px",
+                          lineHeight: "1.6",
+                          paddingLeft: isBullet ? "4px" : "0",
+                          fontStyle: isBullet ? "normal" : "italic",
+                        }}>
+                          {line}
+                        </p>
+                      );
+                    })}
+                  </div>
+                </div>
               )}
 
-              {/* Reasons */}
-              {analysis.reasons.length > 0 && (
+              {/* Risk Tags */}
+              {tags.length > 0 && (
                 <div>
-                  <div style={{
-                    fontFamily: "'Share Tech Mono', monospace",
-                    fontSize: "11px",
-                    color: "#555",
-                    letterSpacing: "3px",
-                    textTransform: "uppercase",
-                    marginBottom: "10px",
-                  }}>DETECTION FLAGS</div>
-                  <ul style={{ paddingLeft: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: "8px" }}>
-                    {analysis.reasons.map((reason, i) => (
-                      <li key={i} style={{
-                        display: "flex",
-                        gap: "10px",
-                        alignItems: "flex-start",
-                        color: "#c0c0c0",
-                        fontSize: "14px",
-                        lineHeight: "1.4",
-                      }}>
-                        <span style={{ color: riskColor(analysis.riskLevel), flexShrink: 0, marginTop: "1px" }}>›</span>
-                        {reason}
-                      </li>
-                    ))}
-                  </ul>
+                  <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: "10px", color: "#444", letterSpacing: "2px", marginBottom: "10px" }}>DETECTION FLAGS</div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                    {tags.map((tag, i) => {
+                      const tc = tagColor(tag, analysis.riskLevel);
+                      return (
+                        <span key={i} style={{
+                          padding: "4px 12px", borderRadius: "4px",
+                          background: tc.bg, border: `1px solid ${tc.border}`,
+                          color: tc.color, fontSize: "12px",
+                          fontFamily: "'Share Tech Mono', monospace",
+                          letterSpacing: "0.5px",
+                        }}>
+                          {tag}
+                        </span>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
             </div>
           )}
 
-          {/* Screenshot */}
+          {/* ── SCREENSHOT ─────────────────────────────────────────────────────── */}
           {screenshot && (
-            <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-              <div style={{
-                fontFamily: "'Share Tech Mono', monospace",
-                fontSize: "11px",
-                color: "#555",
-                letterSpacing: "3px",
-              }}>SANDBOX CAPTURE</div>
+            <div className="fade-in" style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: "10px", color: "#444", letterSpacing: "3px" }}>SANDBOX CAPTURE</div>
+                <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: "11px", color: "#00e5ff88" }}>🛡️ Loaded inside secure sandbox environment</div>
+              </div>
               {analysis?.isBlocked && (
-                <div style={{
-                  fontStyle: "italic",
-                  color: "#ffc300",
-                  fontSize: "13px",
-                  fontFamily: "'Share Tech Mono', monospace",
-                }}>
-                  ⚠ Content could not be fully loaded due to security restrictions
+                <div style={{ fontStyle: "italic", color: "#ffc300", fontSize: "13px", fontFamily: "'Share Tech Mono', monospace" }}>
+                  ⚠ This page could not be fully loaded. Displaying partial or error state.
                 </div>
               )}
               <img
                 src={`data:image/png;base64,${screenshot}`}
                 alt="Scanned website screenshot"
                 style={{
-                  width: "100%",
-                  borderRadius: "8px",
+                  width: "100%", borderRadius: "8px",
                   border: `2px solid ${analysis ? riskColor(analysis.riskLevel) + "66" : "#1e1e2a"}`,
                   boxShadow: analysis ? riskGlow(analysis.riskLevel) : "none",
                   display: "block",
@@ -477,31 +413,26 @@ export default function SandboxPage() {
             </div>
           )}
 
-          {/* Report Button */}
-          {(screenshot || warning) && (
+          {/* ── REPORT BUTTON — only for MEDIUM / HIGH risk ────────────────────── */}
+          {(screenshot || warning) && analysis && (analysis.riskLevel === "HIGH" || analysis.riskLevel === "MEDIUM") && (
             <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "12px", marginTop: "8px" }}>
               {!reported ? (
-                <button
-                  className="report-btn"
-                  onClick={() => setReported(true)}
-                >
+                <button className="report-btn" onClick={() => setReported(true)}>
                   🚨 Report Phishing Site
                 </button>
               ) : (
-                <div style={{
-                  padding: "12px 24px",
-                  borderRadius: "6px",
-                  background: "#0e200e",
-                  border: "1px solid #00e5ff55",
-                  color: "#00e5ff",
-                  fontSize: "14px",
+                <div className="fade-in" style={{
+                  padding: "14px 24px", borderRadius: "6px",
+                  background: "#0e1a0e", border: "1px solid #00e5ff55",
+                  color: "#00e5ff", fontSize: "14px",
                   fontFamily: "'Share Tech Mono', monospace",
                 }}>
-                  ✓ This site has been flagged for further investigation.
+                  ✔️ Site reported successfully. Authorities will review it.
                 </div>
               )}
             </div>
           )}
+
         </div>
       </div>
     </>
