@@ -243,6 +243,7 @@ const TRUSTED_ROOTS = new Set([
     let isTyposquat = false;
     let isBrandMisuse = false;
     let isScamPage = false;
+    let isLegitInstitution = false; // Set after HTML analysis
 
     // ── ROOT-DOMAIN TRUSTED CHECK (runs before ALL heuristics) ────────────────
     // This is the primary false-positive guard for legitimate heavy sites
@@ -301,23 +302,8 @@ const TRUSTED_ROOTS = new Set([
         reasons.push(`Suspicious URL path keywords: "${foundUrlWords.slice(0, 3).join('", "')}"`);
       }
 
-      // ── PRIORITY 1: TRUSTED DOMAIN CHECK ────────────────────────────────────
-      const knownTLDs = [".com", ".in", ".co.in", ".org", ".net", ".gov.in", ".bank.in", ".co", ".io", ".edu"];
-      const matchedTrustedBrand = TRUSTED_BRANDS.find(brand => {
-        return knownTLDs.some(tld => {
-          const canonical = `${brand}${tld}`;
-          return hostname === canonical || hostname.endsWith(`.${canonical}`);
-        }) || hostname === brand;
-      });
-
-      if (matchedTrustedBrand) {
-        isTrustedBrand = true;
-        // HARD RESET: wipe all generic domain signal scores accrued before this point
-        // (long domain, numbers, URL keywords, hyphens) — they are noise for trusted sites
-        riskScore = 0;
-        reasons.length = 0;
-        reasons.push(`Recognized trusted brand domain: ${matchedTrustedBrand}`);
-      } else {
+      // ── BRAND MISUSE & TYPOSQUATTING (Only for non-official domains) ────────
+      if (!isTrustedBrand) {
         // ── PRIORITY 2: TYPOSQUATTING — char substitution ────────────────────
         // Normalize chars (0→o, 1→i/l, 3→e, @→a) and compare to brand names
         const normalized = domainLabel
@@ -344,11 +330,9 @@ const TRUSTED_ROOTS = new Set([
           riskScore += 60;
           const brandName = typosquatBrand || (oldFakeMatch && oldFakeMatch.real);
           reasons.push(`Typosquatting detected: domain impersonates "${brandName}"`);
-        }
-
-        // ── PRIORITY 3: BRAND MISUSE — real name in unofficial domain ────────
-        // e.g. amazon-login-secure.net, paypal-verification.xyz
-        if (!isTyposquat) {
+        } else {
+          // ── PRIORITY 3: BRAND MISUSE — real name in unofficial domain ────────
+          // e.g. amazon-login-secure.net, paypal-verification.xyz, or sbi.in
           const brandInDomain = TRUSTED_BRANDS.find(brand => domainLabel.includes(brand));
           if (brandInDomain) {
             isBrandMisuse = true;
@@ -363,9 +347,12 @@ const TRUSTED_ROOTS = new Set([
     if (htmlContent) {
       const lowerHtml = htmlContent.toLowerCase();
 
-      // Password field — checked for ALL sites (including trusted, it's the exception trigger)
+      // Password field — checked with institution awareness
+      // Institutions (college portals, hospital systems, gov portals) legitimately have login forms.
+      // We defer the password penalty until AFTER institution detection further below.
       const hasPasswordInHtml = lowerHtml.includes('type="password"') || lowerHtml.includes("type='password'");
-      if (hasPasswordInHtml) {
+      if (hasPasswordInHtml && !isTrustedBrand) {
+        // Soft-add: will be cancelled if institution detection fires later
         riskScore += 50;
         reasons.push("Login form detected (password input field)");
       }
@@ -503,11 +490,100 @@ const TRUSTED_ROOTS = new Set([
         const externalLinkDomains = externalLinkMatches
           .map(h => { try { return new URL(h.replace(/href=["']/, '')).hostname; } catch { return ''; } })
           .filter(h => h && h !== hostname);
-        if (externalLinkDomains.length > 10) {
+        // Threshold: 25 (not 10) — real content-rich sites legitimately link to many places
+        // Extra allowance if the page has many sections (linkCount > 20 = likely a real nav site)
+        const linkThreshold = linkCount > 20 ? 40 : 25;
+        if (externalLinkDomains.length > linkThreshold) {
           riskScore += 15;
           reasons.push(`High number of external links: ${externalLinkDomains.length} outbound links`);
         }
       } // end: !isTrustedBrand generic checks
+    }
+
+    // ─── LEGITIMATE INSTITUTION DETECTION ENGINE ───────────────────────────────
+    // Runs AFTER all heuristics so we can evaluate accumulated score against context.
+    // Does NOT zero out scores — dampens them proportionally so genuine threats survive.
+    if (!isTrustedBrand && htmlContent) {
+      const lowerHtml2 = htmlContent.toLowerCase();
+      const bodyText2 = lowerHtml2.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+
+      // 1. Domain TLD signals — strong structural indicator
+      let tldInstitutionScore = 0;
+      try {
+        const _h = new URL(url).hostname.toLowerCase();
+        if (_h.endsWith('.edu') || _h.endsWith('.edu.in') || _h.endsWith('.ac.in') ||
+            _h.endsWith('.ac.uk') || _h.endsWith('.sch.in')) tldInstitutionScore += 40;
+        if (_h.endsWith('.gov') || _h.endsWith('.gov.in') || _h.endsWith('.nic.in')) tldInstitutionScore += 40;
+        if (_h.endsWith('.org') || _h.endsWith('.org.in') || _h.endsWith('.ngo')) tldInstitutionScore += 15;
+        if (_h.endsWith('.mil') || _h.endsWith('.int')) tldInstitutionScore += 40;
+      } catch(e) {}
+
+      // 2. Content signals — institutional language in body text
+      let contentInstitutionScore = 0;
+      const INSTITUTION_PHRASES = [
+        ['college', 10], ['university', 10], ['institute', 10], ['school of', 10],
+        ['department of', 8], ['faculty', 8], ['students', 6], ['alumni', 8],
+        ['campus', 8], ['hostel', 6], ['semester', 8], ['examination', 8],
+        ['admissions', 6], ['curriculum', 8], ['accredited', 10], ['affiliated', 10],
+        ['hospital', 10], ['clinic', 8], ['patients', 6], ['healthcare', 8],
+        ['government', 8], ['ministry', 10], ['municipality', 10], ['department', 6],
+        ['ngo', 8], ['nonprofit', 8], ['foundation', 8], ['trust', 6], ['charity', 8],
+        ['corporate', 6], ['headquarters', 8], ['annual report', 10], ['investor', 8],
+        ['about us', 4], ['contact us', 4], ['our team', 4], ['our mission', 4],
+      ];
+      for (const [phrase, pts] of INSTITUTION_PHRASES) {
+        if (bodyText2.includes(phrase)) contentInstitutionScore += pts;
+      }
+
+      // 3. Structural richness signals — real sites have nav, footer, many sections
+      let structureScore = 0;
+      if ((lowerHtml2.match(/<nav[\s>]/g) || []).length >= 1) structureScore += 10;
+      if ((lowerHtml2.match(/<footer[\s>]/g) || []).length >= 1) structureScore += 10;
+      if ((lowerHtml2.match(/<header[\s>]/g) || []).length >= 1) structureScore += 5;
+      if ((lowerHtml2.match(/<section[\s>]|<article[\s>]/g) || []).length >= 3) structureScore += 10;
+      if ((lowerHtml2.match(/href=["'].*?(about|contact|team|career|gallery|news|event)/gi) || []).length >= 2) structureScore += 15;
+
+      // 4. Registration/admission words ≠ phishing — whitelist them for institutions
+      const LEGIT_REGISTRATION_WORDS = [
+        'admission', 'register', 'registration', 'apply', 'application form',
+        'enrollment', 'enroll', 'sign up', 'new user', 'create account',
+      ];
+      const hasLegitRegistration = LEGIT_REGISTRATION_WORDS.some(w => bodyText2.includes(w));
+
+      // 5. Social media links — these are normal trust indicators, not phishing signals
+      const SOCIAL_DOMAINS = ['facebook.com','twitter.com','instagram.com','youtube.com',
+        'linkedin.com','x.com','t.me','wa.me','whatsapp.com','pinterest.com'];
+      const hasSocialLinks = SOCIAL_DOMAINS.some(d => lowerHtml2.includes(d));
+
+      // Total institution confidence score
+      const institutionConfidence = tldInstitutionScore + contentInstitutionScore + structureScore;
+
+      if (institutionConfidence >= 30) {
+        isLegitInstitution = true;
+        const DAMPENING = institutionConfidence >= 60 ? 0.35 : 0.55;
+
+        // Apply dampening to suppress noise-inflated score
+        const rawScore = riskScore;
+        riskScore = Math.floor(riskScore * DAMPENING);
+
+        // Remove password-form reason if institution has a portal — expected behaviour
+        const pwIdx = reasons.findIndex(r => r.includes('password input field'));
+        if (pwIdx !== -1) reasons.splice(pwIdx, 1);
+
+        // Remove urgency/form-language noise if institution has legit registration
+        if (hasLegitRegistration) {
+          const cleanOut = ['Urgency manipulation', 'Suspicious form language', 'Thin landing page', 'little readable text'];
+          for (let i = reasons.length - 1; i >= 0; i--) {
+            if (cleanOut.some(c => reasons[i].includes(c))) reasons.splice(i, 1);
+          }
+        }
+
+        // Add the institution signal as a positive badge
+        reasons.push(`Legitimate institution signals detected (confidence score: ${institutionConfidence})`);
+        if (hasSocialLinks) reasons.push('Official social media presence detected (trust signal)');
+
+        if (isDev) console.error(`[CIVIX] Institution detected: tld=${tldInstitutionScore} content=${contentInstitutionScore} struct=${structureScore} → score ${rawScore} → ${riskScore} (dampening ${DAMPENING})`);
+      }
     }
 
     // ─── BLOCKED / TIMEOUT OVERRIDE ──────────────────────────────────────────
@@ -531,47 +607,50 @@ const TRUSTED_ROOTS = new Set([
     if (isTrustedBrand && !(hasPasswordField && hasPhishingContent)) {
       riskScore = Math.min(riskScore, 20);
     }
+    // For legitimate institutions: hard cap at 48 (MEDIUM ceiling) unless typosquat/scam/brand-misuse
+    if (isLegitInstitution && !isTyposquat && !isBrandMisuse && !isScamPage) {
+      riskScore = Math.min(riskScore, 48);
+    }
 
-    let riskLevel = "LOW";
+    // ─── SINGLE SOURCE OF TRUTH: score → level ────────────────────────────────────
+    // Every riskLevel in this file must flow through this function.
+    // NO code below may assign riskLevel directly without going through scoreToLevel().
+    function scoreToLevel(s) {
+      if (s <= 25) return "LOW";
+      if (s <= 50) return "MEDIUM";
+      return "HIGH";  // 51-100
+    }
+
+    let riskLevel = scoreToLevel(riskScore);
     let explanation = "";
 
-    // Build a contextual bullet list from actual detected signals
+    // Build explanation from flags and current score-derived level
     const signalBullets = [];
-    if (isTyposquat)     signalBullets.push("The domain structure is manipulated using character substitutions to impersonate a real brand");
-    if (isBrandMisuse)   signalBullets.push("A legitimate brand name is embedded in an unofficial domain to deceive users");
-    if (isScamPage)      signalBullets.push("The page contains psychological triggers such as fake prizes, urgency language, or deceptive rewards");
+    if (isTyposquat)      signalBullets.push("The domain structure is manipulated using character substitutions to impersonate a real brand");
+    if (isBrandMisuse)    signalBullets.push("A legitimate brand name is embedded in an unofficial domain to deceive users");
+    if (isScamPage)       signalBullets.push("The page contains psychological triggers such as fake prizes, urgency language, or deceptive rewards");
     if (hasPasswordField) signalBullets.push("The page contains a login form which could be used to harvest credentials");
     if (hasPhishingContent) signalBullets.push("Suspicious form language, urgency keywords, or data-exfiltration signals were detected");
-    if (isBlocked)       signalBullets.push("The site blocked sandbox access, which is common with obfuscated or bot-protected phishing pages");
-    if (riskScore >= 30 && !isTyposquat && !isBrandMisuse && !isScamPage && !hasPasswordField)
+    if (isBlocked)        signalBullets.push("The site blocked sandbox access, which is common with obfuscated or bot-protected phishing pages");
+    if (riskScore >= 26 && !isTyposquat && !isBrandMisuse && !isScamPage && !hasPasswordField)
       signalBullets.push("Multiple low-confidence signals collectively indicate suspicious behavior");
 
+    // Derive riskLevel from score — flags only influence explanation text
+    riskLevel = scoreToLevel(riskScore);
+
     if (isBlocked) {
-      riskLevel = "MEDIUM";
       explanation = `This website could not be fully analyzed:\n• ${signalBullets.join("\n• ")}\n\nProceed with caution and avoid entering any personal information.`;
-    } else if (isTyposquat) {
-      riskLevel = "HIGH";
-      explanation = `This website is highly suspicious based on multiple phishing indicators:\n• ${signalBullets.join("\n• ")}\n\nUsers should avoid interacting with this site entirely.`;
-    } else if (isBrandMisuse) {
-      riskLevel = "HIGH";
-      explanation = `This website is highly suspicious based on multiple phishing indicators:\n• ${signalBullets.join("\n• ")}\n\nUsers should avoid interacting with this site entirely.`;
-    } else if (isScamPage) {
-      riskLevel = "HIGH";
+    } else if (isTyposquat || isBrandMisuse || isScamPage || (hasPasswordField && hasPhishingContent)) {
       explanation = `This website is highly suspicious based on multiple phishing indicators:\n• ${signalBullets.join("\n• ")}\n\nUsers should avoid interacting with this site entirely.`;
     } else if (isTrustedBrand) {
-      riskLevel = "LOW";
       explanation = `This website appears legitimate:\n• Domain and content are consistent with a recognized trusted brand\n• No strong phishing indicators were detected\n\nHowever, always verify URLs before sharing sensitive information.`;
-    } else if (hasPasswordField && hasPhishingContent) {
-      riskLevel = "HIGH";
-      explanation = `This website is highly suspicious based on multiple phishing indicators:\n• ${signalBullets.join("\n• ")}\n\nUsers should avoid interacting with this site entirely.`;
-    } else if (riskScore >= 60) {
-      riskLevel = "HIGH";
+    } else if (isLegitInstitution) {
+      explanation = `This website shows characteristics of a legitimate institutional site:\n• Institutional content and structure detected\n• ${signalBullets.length > 0 ? signalBullets.join("\n• ") : "No strong phishing patterns detected"}\n\nVerify the domain matches the official institution URL before sharing credentials.`;
+    } else if (riskLevel === "HIGH") {
       explanation = `This website is highly suspicious based on multiple phishing indicators:\n• ${signalBullets.length > 0 ? signalBullets.join("\n• ") : "Multiple domain and content risk signals accumulated above the high-risk threshold"}\n\nUsers should avoid interacting with this site entirely.`;
-    } else if (riskScore >= 30) {
-      riskLevel = "MEDIUM";
+    } else if (riskLevel === "MEDIUM") {
       explanation = `This website shows several suspicious characteristics:\n• ${signalBullets.length > 0 ? signalBullets.join("\n• ") : "Some elements resemble phishing behavior"}\n• Certain patterns indicate potential risk\n\nProceed with caution and avoid sharing sensitive information.`;
     } else {
-      riskLevel = "LOW";
       explanation = `This website appears legitimate:\n• No strong phishing indicators detected\n• Domain and content are consistent with expected behavior\n\nHowever, always verify before sharing sensitive information.`;
     }
 
@@ -658,15 +737,15 @@ const TRUSTED_ROOTS = new Set([
 
         if (isDev) console.error(`[CIVIX] Gemini AI: ${aiRiskLevel} (confidence ${aiConfidence}%) — ${aiResult.reason}`);
 
-        // Apply AI result ONLY if confidence >= 60 and NOT trusted domain
+        // Apply AI result ONLY if confidence >= 60 and NOT trusted domain or institution
         if (aiConfidence >= 60 && !isTrustedBrand) {
-          if (aiRiskLevel === "HIGH" && riskLevel !== "HIGH" && !isTrustedBrand) {
-            riskLevel = "HIGH";
+          if (aiRiskLevel === "HIGH" && !isTrustedBrand) {
+            // Escalate score to HIGH band — label re-derives from score at end
             riskScore = Math.max(riskScore, 65);
             reasons.push(`AI analysis (${aiConfidence}% confidence): ${aiResult.reason}`);
             explanation = `This website is highly suspicious based on multiple phishing indicators:\n• AI-detected: ${aiResult.reason}\n• ${signalBullets.length > 0 ? signalBullets.join("\n• ") : "Multiple heuristic signals"}\n\nUsers should avoid interacting with this site entirely.`;
-          } else if (aiRiskLevel === "MEDIUM" && riskLevel === "LOW") {
-            riskLevel = "MEDIUM";
+          } else if (aiRiskLevel === "MEDIUM" && scoreToLevel(riskScore) === "LOW") {
+            // Escalate score to MEDIUM band — label re-derives from score at end
             riskScore = Math.max(riskScore, 35);
             reasons.push(`AI analysis (${aiConfidence}% confidence): ${aiResult.reason}`);
             explanation = `This website shows several suspicious characteristics:\n• AI-detected: ${aiResult.reason}\n\nProceed with caution and avoid sharing sensitive information.`;
@@ -747,12 +826,10 @@ const TRUSTED_ROOTS = new Set([
       // Threshold: flag if credential sub-score is high enough
       fakeLoginDetected = credentialRiskScore >= 50;
 
-      // Merge into main risk score (capped contribution of 60 to avoid over-inflation)
+      // Merge into main risk score only — riskLevel re-derives from score at end
       if (fakeLoginDetected) {
         const contribution = Math.min(60, credentialRiskScore);
         riskScore = Math.min(100, riskScore + contribution);
-        if (riskLevel === "LOW") riskLevel = "MEDIUM";
-        if (credentialRiskScore >= 80 && riskLevel !== "HIGH") riskLevel = "HIGH";
       }
     }
 
@@ -811,9 +888,8 @@ const TRUSTED_ROOTS = new Set([
           if (phraseCount >= 4)      ocrRiskScore = 40;
           else if (phraseCount >= 2) ocrRiskScore = 25;
           else                       ocrRiskScore = 10;
+          // Only update score — riskLevel re-derives from score at the very end
           riskScore = Math.min(100, riskScore + ocrRiskScore);
-          if (ocrRiskScore >= 25 && riskLevel === "LOW") riskLevel = "MEDIUM";
-          if (ocrRiskScore >= 40 && riskLevel !== "HIGH") riskLevel = "HIGH";
         }
       }
 
@@ -885,16 +961,37 @@ const TRUSTED_ROOTS = new Set([
       }
     }
 
+    // \u2500\u2500\u2500 DEFINITIVE FINAL CLASSIFICATION \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    // After every score mutation (heuristics, dampening, OCR, fake login, trust caps,
+    // trust override), recompute riskLevel from the actual final number.
+    // This is the one and only place where riskLevel is written to the output.
+    const finalScore = Math.min(100, Math.max(0, Math.round(riskScore)));
+    const finalLevel = scoreToLevel(finalScore);
+
+    // Sync explanation if label changed from intermediate value
+    if (finalLevel !== riskLevel && !isTrustedBrand) {
+      if (finalLevel === "HIGH") {
+        explanation = `This website is highly suspicious based on multiple phishing indicators:\\n• Multiple domain and content risk signals accumulated above the high-risk threshold\\n\\nUsers should avoid interacting with this site entirely.`;
+      } else if (finalLevel === "MEDIUM") {
+        explanation = `This website shows several suspicious characteristics that warrant caution:\\n• Some elements resemble phishing behavior\\n\\nProceed with caution and avoid sharing sensitive information.`;
+      } else {
+        explanation = `This website appears legitimate:\\n• No strong phishing indicators detected\\n• Domain and content are consistent with expected behavior\\n\\nHowever, always verify before sharing sensitive information.`;
+      }
+    }
+
+    if (isDev) console.error(`[CIVIX] FINAL: score=${finalScore} level=${finalLevel} (was riskLevel=${riskLevel})`);
+
     const result = {
       screenshot: screenshotBuffer.toString("base64"),
       warning: isBlocked ? "Site blocked sandbox or prevented secure analysis" : null,
       analysis: {
-        riskScore: Math.min(100, riskScore),
-        riskLevel,
+        riskScore: finalScore,
+        riskLevel: finalLevel,
         reasons,
         explanation,
         isBlocked,
         isTrustedBrand,
+        isLegitInstitution,
         fakeLoginDetected,
         loginSignals,
         credentialRiskScore,

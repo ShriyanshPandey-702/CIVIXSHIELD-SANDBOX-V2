@@ -3,10 +3,10 @@
 import { useState, useEffect, useRef } from "react";
 
 const SCAN_STEPS = [
-  "Initializing sandbox...",
-  "Rendering environment...",
-  "Analyzing threats...",
-  "Finalizing report...",
+  "Checking DNS...",
+  "Inspecting forms...",
+  "OCR scanning...",
+  "Threat intelligence match...",
 ];
 
 type Analysis = {
@@ -16,6 +16,7 @@ type Analysis = {
   explanation: string;
   isBlocked?: boolean;
   isTrustedBrand?: boolean;
+  isLegitInstitution?: boolean;
   fakeLoginDetected?: boolean;
   loginSignals?: string[];
   credentialRiskScore?: number;
@@ -57,6 +58,66 @@ function tagColor(tag: string, level: string): { bg: string; border: string; col
   if (safe.includes(tag)) return { bg: "#00e5ff11", border: "#00e5ff55", color: "#00e5ff" };
   if (warn.includes(tag)) return { bg: "#ffc30011", border: "#ffc30055", color: "#ffc300" };
   return { bg: "#ff2d5511", border: "#ff2d5555", color: "#ff2d55" };
+}
+
+function CircularScoreMeter({ score, riskLevel }: { score: number, riskLevel: "LOW" | "MEDIUM" | "HIGH" }) {
+  const [displayScore, setDisplayScore] = useState(0);
+
+  useEffect(() => {
+    const duration = 1500;
+    const start = Date.now();
+    const animate = () => {
+      const now = Date.now();
+      const progress = Math.min((now - start) / duration, 1);
+      // EaseOutCubic
+      const ease = 1 - Math.pow(1 - progress, 3);
+      setDisplayScore(Math.floor(ease * score));
+      if (progress < 1) requestAnimationFrame(animate);
+    };
+    requestAnimationFrame(animate);
+  }, [score]);
+
+  const getHeatColor = (s: number) => {
+    if (s <= 25) return "#00ff66"; // Neon Green
+    if (s <= 50) return "#ffc300"; // Yellow
+    if (s <= 75) return "#ff9500"; // Orange
+    return "#ff2d55"; // Red
+  };
+
+  const color = getHeatColor(score);
+  const radius = 55;
+  const strokeWidth = 8;
+  const circumference = 2 * Math.PI * radius;
+  const strokeDashoffset = circumference - (displayScore / 100) * circumference;
+  
+  const label = riskLevel === "LOW" ? "Trust Score" : "Threat Score";
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "12px", margin: "10px 0 20px" }}>
+      <div style={{ position: "relative", width: "130px", height: "130px", display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <svg width="130" height="130" viewBox="0 0 130 130" style={{ transform: "rotate(-90deg)", position: "absolute", top: 0, left: 0 }}>
+          <circle cx="65" cy="65" r={radius} fill="none" stroke="#1e1e2a" strokeWidth={strokeWidth} />
+          <circle 
+            cx="65" cy="65" r={radius} 
+            fill="none" 
+            stroke={color} 
+            strokeWidth={strokeWidth}
+            strokeDasharray={circumference}
+            strokeDashoffset={strokeDashoffset}
+            strokeLinecap="round"
+            style={{ 
+              transition: "stroke-dashoffset 0.1s linear", 
+              filter: `drop-shadow(0 0 10px ${color}aa)` 
+            }}
+          />
+        </svg>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", zIndex: 1 }}>
+          <span style={{ fontFamily: "'Rajdhani', sans-serif", fontSize: "42px", fontWeight: 700, color: "#fff", lineHeight: 1, textShadow: `0 0 15px ${color}88` }}>{displayScore}</span>
+        </div>
+      </div>
+      <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: "13px", color: color, letterSpacing: "3px", textTransform: "uppercase", textShadow: `0 0 8px ${color}66` }}>{label}</span>
+    </div>
+  );
 }
 
 export default function SandboxPage() {
@@ -198,10 +259,21 @@ export default function SandboxPage() {
         .pulse { animation: pulse-glow 1.8s ease-in-out infinite; }
         @keyframes fade-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
         .fade-in { animation: fade-in 0.4s ease forwards; }
-        @keyframes meter-fill { from { width: 0%; } }
-        .meter-bar { animation: meter-fill 0.9s cubic-bezier(0.22,1,0.36,1) forwards; }
         @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
         .blink { animation: blink 1s ease-in-out infinite; }
+
+        @keyframes neon-pulse-high { 
+          from { box-shadow: 0 0 10px #ff2d5522, inset 0 0 5px #ff2d5511; border-color: #ff2d5544; } 
+          to { box-shadow: 0 0 35px #ff2d55aa, inset 0 0 15px #ff2d5544; border-color: #ff2d55; } 
+        }
+        @keyframes neon-pulse-medium { 
+          from { box-shadow: 0 0 10px #ffc30022, inset 0 0 5px #ffc30011; border-color: #ffc30044; } 
+          to { box-shadow: 0 0 35px #ffc300aa, inset 0 0 15px #ffc30044; border-color: #ffc300; } 
+        }
+        @keyframes neon-pulse-low { 
+          from { box-shadow: 0 0 10px #00ff6622, inset 0 0 5px #00ff6611; border-color: #00ff6644; } 
+          to { box-shadow: 0 0 35px #00ff66aa, inset 0 0 15px #00ff6644; border-color: #00ff66; } 
+        }
       `}</style>
 
       <div style={{ minHeight: "100vh", background: "#0a0a0a", display: "flex", flexDirection: "column", alignItems: "center", padding: "60px 20px 100px" }}>
@@ -279,7 +351,7 @@ export default function SandboxPage() {
           )}
 
           {/* ── HIGH RISK ALERT BANNER ─────────────────────────────────────────── */}
-          {analysis?.riskLevel === "HIGH" && (
+          {analysis?.riskLevel === "HIGH" && analysis.riskScore > 50 && !analysis.isTrustedBrand && (
             <div className="fade-in blink" style={{
               padding: "20px 24px", background: "#1a0810",
               border: "2px solid #ff2d55", borderRadius: "8px",
@@ -325,10 +397,9 @@ export default function SandboxPage() {
           {analysis && (
             <div className="fade-in" style={{
               background: "#0e0e16", border: `1px solid ${riskColor(analysis.riskLevel)}44`,
-              borderLeft: `4px solid ${riskColor(analysis.riskLevel)}`,
-              borderRadius: "10px", padding: "24px",
+              borderRadius: "10px", padding: "30px 24px",
               display: "flex", flexDirection: "column", gap: "18px",
-              boxShadow: riskGlow(analysis.riskLevel),
+              animation: `neon-pulse-${analysis.riskLevel.toLowerCase()} 2s infinite alternate ease-in-out`,
             }}>
               {/* Risk Header */}
               <div style={{ display: "flex", alignItems: "center", gap: "16px", flexWrap: "wrap" }}>
@@ -339,6 +410,11 @@ export default function SandboxPage() {
                 {analysis.isTrustedBrand && (
                   <div style={{ padding: "4px 14px", borderRadius: "4px", background: "#00e5ff11", border: "1px solid #00e5ff44", color: "#00e5ff", fontSize: "11px", fontFamily: "'Share Tech Mono', monospace" }}>
                     ✓ {analysis.loginSignals && analysis.loginSignals.length > 0 ? "Trusted Official Login Page" : "Trusted Brand"}
+                  </div>
+                )}
+                {analysis.isLegitInstitution && !analysis.isTrustedBrand && (
+                  <div style={{ padding: "4px 14px", borderRadius: "4px", background: "#00ff9911", border: "1px solid #00ff9944", color: "#00ff99", fontSize: "11px", fontFamily: "'Share Tech Mono', monospace" }}>
+                    🏛 Institutional Site
                   </div>
                 )}
                 {analysis.fakeLoginDetected && (
@@ -357,15 +433,9 @@ export default function SandboxPage() {
                 )}
               </div>
 
-              {/* Risk Meter */}
-              <div>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
-                  <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: "10px", color: "#444", letterSpacing: "2px" }}>THREAT SCORE</span>
-                  <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: "12px", color: riskColor(analysis.riskLevel) }}>{analysis.riskScore}/100</span>
-                </div>
-                <div style={{ width: "100%", height: "8px", background: "#1e1e2a", borderRadius: "4px", overflow: "hidden" }}>
-                  <div className="meter-bar" style={{ height: "100%", width: `${Math.min(100, analysis.riskScore)}%`, background: `linear-gradient(90deg, ${riskColor(analysis.riskLevel)}88, ${riskColor(analysis.riskLevel)})`, borderRadius: "4px", boxShadow: `0 0 8px ${riskColor(analysis.riskLevel)}` }} />
-                </div>
+              {/* Animated Circular Score Meter */}
+              <div style={{ width: "100%", display: "flex", justifyContent: "center", margin: "10px 0" }}>
+                <CircularScoreMeter score={analysis.riskScore} riskLevel={analysis.riskLevel} />
               </div>
 
               {/* Explanation — rendered as structured lines */}
