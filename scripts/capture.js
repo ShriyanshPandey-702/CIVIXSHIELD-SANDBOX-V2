@@ -3,6 +3,18 @@ const { createWorker } = require('tesseract.js');
 const url = process.argv[2];
 const isDev = process.env.NODE_ENV !== 'production';
 
+// ─── FORENSIC LOGGING ─────────────────────────────────────────────────────
+const logs = [];
+function addLog(type, msg) {
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const msStr = now.getMilliseconds().toString().padStart(3, '0');
+  logs.push({ time: `${timeStr}.${msStr}`, type, msg });
+  if (isDev) console.error(`[FORENSIC] ${type.toUpperCase()}: ${msg}`);
+}
+
+addLog('info', 'Initializing CIVIXSHIELD sandbox environment');
+
 // ─── SAFE ENV KEY EXTRACTION ──────────────────────────────────────────────
 // Keys are ONLY read server-side here. Never exposed to frontend.
 function extractApiKey(raw) {
@@ -25,13 +37,25 @@ console.error(`[CIVIX] STARTUP — Gemini key: ${GEMINI_KEY ? `SET (${GEMINI_KEY
 
 // ─── TRUSTED BRAND WHITELIST ───────────────────────────────────────────────
 const TRUSTED_BRANDS = [
+  // Global Tech & Social
   "google", "youtube", "gmail", "facebook", "instagram", "twitter", "x.com",
   "whatsapp", "microsoft", "apple", "amazon", "netflix", "linkedin", "github",
   "stackoverflow", "wikipedia", "reddit", "dropbox", "spotify", "airbnb",
   "uber", "paypal", "stripe", "shopify", "zoom", "slack", "notion", "figma",
   "canva", "adobe", "salesforce", "wordpress", "cloudflare", "vercel",
+  "tiktok", "twitch", "yahoo", "pinterest", "discord", "telegram", "snapchat",
+  "samsung", "sony", "tencent", "alibaba", "oracle", "ibm", "cisco", "intel",
+  // US & Global Finance
+  "chase", "bankofamerica", "wellsfargo", "binance", "coinbase",
+  "americanexpress", "mastercard", "visa", "capitalone", "citibank",
+  // Indian Banking & Govt
   "sbi", "hdfc", "icici", "axisbank", "kotak", "npci", "uidai", "gov.in",
-  "india.gov", "irctc", "incometax", "mca", "sebi", "rbi"
+  "india.gov", "irctc", "incometax", "mca", "sebi", "rbi", "pnb", "bob",
+  "canara", "unionbank", "indianbank", "bseindia", "nseindia",
+  // Indian Tech & Commerce
+  "paytm", "phonepe", "zerodha", "groww", "upstox", "myntra", "nykaa",
+  "zomato", "swiggy", "makemytrip", "yatra", "cleartrip", "bookmyshow",
+  "flipkart", "tata", "reliance", "jio", "airtel"
 ];
 
 // ─── TYPOSQUATTING PATTERNS ────────────────────────────────────────────────
@@ -46,6 +70,8 @@ const TYPOSQUAT_PATTERNS = [
   { real: "instagram", fakes: ["instageam","1nstagram","instagramm"] },
   { real: "sbi",       fakes: ["sb1","sbi-bank","sbionline"] },
   { real: "hdfc",      fakes: ["hdfcc","hd-fc","hdfcbank-in"] },
+  { real: "paytm",     fakes: ["payteem","paytime","pay-tm"] },
+  { real: "whatsapp",  fakes: ["whatsap","whatapp","watsapp"] }
 ];
 
 // ─── ROOT DOMAIN EXTRACTION ───────────────────────────────────────────────
@@ -54,7 +80,7 @@ function getRootDomain(host) {
   const h = host.toLowerCase().replace(/^www\./, "");
   const parts = h.split(".");
   // Handle known two-part TLDs (co.in, co.uk, com.au, etc.)
-  const twoPartTLDs = ["co.in", "co.uk", "com.au", "co.nz", "gov.in", "net.in", "org.in"];
+  const twoPartTLDs = ["co.in", "co.uk", "com.au", "co.nz", "gov.in", "net.in", "org.in", "ac.in", "edu.in", "bank.in", "res.in"];
   const lastTwo = parts.slice(-2).join(".");
   if (twoPartTLDs.includes(lastTwo) && parts.length >= 3) {
     return parts.slice(-3).join(".");
@@ -76,29 +102,39 @@ const TRUSTED_ROOTS = new Set([
   "facebook.com", "instagram.com", "whatsapp.com", "meta.com",
   // Amazon
   "amazon.com", "amazon.in", "amazon.co.uk", "amazonaws.com",
-  // Finance & payments
-  "paypal.com", "stripe.com",
-  "sbi.co.in", "onlinesbi.sbi", "hdfcbank.com", "icicibank.com",
-  "npci.org.in",
-  // Dev & cloud
+  // Global Finance & Payments
+  "paypal.com", "stripe.com", "chase.com", "bankofamerica.com", "wellsfargo.com",
+  "binance.com", "coinbase.com", "americanexpress.com", "mastercard.us", "visa.com", "capitalone.com", "citi.com",
+  // Indian Banking & Payments
+  "sbi.co.in", "onlinesbi.sbi", "hdfcbank.com", "icicibank.com", "axisbank.com",
+  "kotak.com", "pnbindia.in", "bankofbaroda.in", "canarabank.com", "unionbankofindia.co.in",
+  "indianbank.in", "npci.org.in", "paytm.com", "phonepe.com", "zerodha.com", "groww.in", "upstox.com",
+  // Dev & Cloud
   "github.com", "gitlab.com", "cloudflare.com", "vercel.com",
-  "stackoverflow.com", "heroku.com",
-  // Social & content
+  "stackoverflow.com", "heroku.com", "oracle.com", "ibm.com", "cisco.com", "intel.com",
+  // Social, Media & Content
   "twitter.com", "x.com", "reddit.com", "wikipedia.org",
-  "netflix.com", "spotify.com", "dropbox.com",
+  "netflix.com", "spotify.com", "dropbox.com", "tiktok.com", "twitch.tv", "yahoo.com",
+  "pinterest.com", "discord.com", "t.me", "snapchat.com",
   // Productivity
   "slack.com", "zoom.us", "notion.so", "figma.com",
   "canva.com", "adobe.com", "salesforce.com",
-  // Commerce
-  "flipkart.com", "shopify.com",
-  // Indian government & banking
+  // Global Commerce
+  "shopify.com", "airbnb.com", "uber.com", "samsung.com", "sony.com", "alibaba.com",
+  // Indian Commerce & Services
+  "flipkart.com", "myntra.com", "nykaa.com", "zomato.com", "swiggy.com",
+  "makemytrip.com", "yatra.com", "cleartrip.com", "bookmyshow.com", "tata.com",
+  "jiomart.com", "jio.com", "airtel.in",
+  // Indian government & regulatory
   "irctc.co.in", "indianrailways.gov.in",
-  "incometax.gov.in", "uidai.gov.in",
+  "incometax.gov.in", "uidai.gov.in", "mca.gov.in", "sebi.gov.in", "rbi.org.in",
+  "bseindia.com", "nseindia.com", "india.gov.in"
 ]);
 
 (async () => {
   let browser;
   try {
+    addLog('info', 'Booting Chromium isolation chamber');
     browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({
       viewport: { width: 1280, height: 800 },
@@ -119,14 +155,17 @@ const TRUSTED_ROOTS = new Set([
 
     let timedOut = false;
     try {
+      addLog('info', `Resolving DNS and opening URL: ${url}`);
       await page.goto(url, {
         waitUntil: "domcontentloaded",
         timeout: 6000,  // Fast-fail: heavy sites must respond within 6s
       });
       // Brief settle time for DOM to stabilise after load event
       await page.waitForTimeout(1000);
+      addLog('success', 'Page DOM successfully loaded');
     } catch (navErr) {
       timedOut = true;
+      addLog('warning', `Page load timed out (6s limit reached)`);
     }
 
     // Always try to get HTML even after timeout (partial content is better than nothing)
@@ -143,6 +182,7 @@ const TRUSTED_ROOTS = new Set([
     // Capture screenshot — with retry fallback to guarantee output
     let screenshotBuffer;
     try {
+      addLog('info', 'Capturing forensic screenshot');
       screenshotBuffer = await page.screenshot({
         fullPage: false,
         type: "png",
@@ -152,10 +192,12 @@ const TRUSTED_ROOTS = new Set([
     } catch (ssErr) {
       // Retry once with extra wait
       try {
+        addLog('warning', 'Screenshot failed, retrying fallback method');
         await page.waitForTimeout(1000);
         screenshotBuffer = await page.screenshot({ fullPage: false, type: "png" });
       } catch (ssErr2) {
         // Last resort: blank fallback page
+        addLog('danger', 'Screenshot failed completely, injecting blank fallback');
         await page.setContent("<html style='background:#202124'><body></body></html>");
         screenshotBuffer = await page.screenshot({ fullPage: false, type: "png" });
       }
@@ -169,6 +211,7 @@ const TRUSTED_ROOTS = new Set([
     // Lightweight — uses no external calls, finishes in <50ms.
     let domLoginSignals = {};
     try {
+      addLog('info', 'Injecting script to inspect live DOM objects (forms, inputs)');
       domLoginSignals = await page.evaluate(() => {
         const inputs = Array.from(document.querySelectorAll('input'));
         const forms  = Array.from(document.querySelectorAll('form'));
@@ -230,9 +273,11 @@ const TRUSTED_ROOTS = new Set([
         };
       });
     } catch(domErr) {
+      addLog('warning', 'Live DOM inspection failed');
       if (isDev) console.error('[CIVIX] DOM login scan failed:', domErr.message);
     }
 
+    addLog('info', 'Terminating browser context');
     await browser.close();
 
     // ─── ANALYSIS ENGINE ─────────────────────────────────────────────────────
@@ -250,14 +295,32 @@ const TRUSTED_ROOTS = new Set([
     // (Amazon, Flipkart, Google, SBI) that would otherwise trip generic signals.
     try {
       const _parsedForRoot = new URL(url);
-      const _rawHost = _parsedForRoot.hostname.toLowerCase();
+      const _rawHost = _parsedForRoot.hostname.toLowerCase().replace(/^www\./, "");
       const rootDomain = getRootDomain(_rawHost);
+      
       if (TRUSTED_ROOTS.has(rootDomain)) {
         isTrustedBrand = true;
         riskScore = 5;
-        hostname = _rawHost.replace(/^www\./, "");
+        hostname = _rawHost;
         reasons.push("Trusted domain (official source)");
+        addLog('success', `Official trusted domain matched whitelist: ${rootDomain}`);
         if (isDev) console.error(`[CIVIX] Trusted root matched: ${rootDomain} → forcing LOW`);
+      } else {
+        // ── DELEGATED NAMESPACE VERIFICATION ──────────────────────────
+        const TRUSTED_NAMESPACES = [".bank.in", ".co.in", ".gov.in", ".nic.in", ".edu.in", ".ac.in", ".org.in", ".ernet.in", ".res.in"];
+        const tldMatch = TRUSTED_NAMESPACES.find(ns => rootDomain.endsWith(ns));
+        
+        if (tldMatch) {
+          const brandLabel = rootDomain.slice(0, -(tldMatch.length)); // remove the .bank.in part
+          if (TRUSTED_BRANDS.includes(brandLabel)) {
+            isTrustedBrand = true;
+            riskScore = 5;
+            hostname = _rawHost;
+            reasons.push(`Trusted domain (verified delegated namespace: ${tldMatch})`);
+            addLog('success', `Trusted brand "${brandLabel}" matched verified namespace ${tldMatch}`);
+            if (isDev) console.error(`[CIVIX] Delegated namespace matched: ${brandLabel}${tldMatch} → forcing LOW`);
+          }
+        }
       }
     } catch(e) {}
 
@@ -302,43 +365,81 @@ const TRUSTED_ROOTS = new Set([
         reasons.push(`Suspicious URL path keywords: "${foundUrlWords.slice(0, 3).join('", "')}"`);
       }
 
-      // ── BRAND MISUSE & TYPOSQUATTING (Only for non-official domains) ────────
+      // ── BRAND IMPERSONATION & TYPOSQUATTING (Only for non-official domains) ──
       if (!isTrustedBrand) {
-        // ── PRIORITY 2: TYPOSQUATTING — char substitution ────────────────────
-        // Normalize chars (0→o, 1→i/l, 3→e, @→a) and compare to brand names
-        const normalized = domainLabel
-          .replace(/0/g, "o")
-          .replace(/1/g, "i")
-          .replace(/3/g, "e")
-          .replace(/@/g, "a")
-          .replace(/\$/g, "s")
-          .replace(/5/g, "s")
-          .replace(/4/g, "a")
-          .split("-")[0]; // Take only the first chunk before hyphens
+        addLog('info', 'Checking domain for typosquatting and brand impersonation');
 
-        const typosquatBrand = TRUSTED_BRANDS.find(brand =>
-          normalized.includes(brand) || brand.includes(normalized)
-        );
+        let foundTyposquat = false;
+        let foundBrandMisuse = false;
+        let targetBrand = null;
 
-        // Also keep the old fake-list matching as a secondary signal
-        const oldFakeMatch = TYPOSQUAT_PATTERNS.find(p =>
-          p.fakes.some(fake => hostname.includes(fake))
-        );
+        // 1. Check direct Fake Patterns
+        const oldFakeMatch = TYPOSQUAT_PATTERNS.find(p => p.fakes.some(fake => hostname.includes(fake)));
+        if (oldFakeMatch) {
+          foundTyposquat = true;
+          targetBrand = oldFakeMatch.real;
+        }
 
-        if (typosquatBrand || oldFakeMatch) {
+        // 2. Check affixes (Brand Impersonation)
+        const AFFIX_LIST = ["login", "secure", "verify", "update", "account", "support", "online", "portal", "auth", "service", "banking"];
+        // Split by dash or dot to find exact words
+        const domainWords = domainLabel.split(/[-.]/);
+        
+        for (const brand of TRUSTED_BRANDS) {
+          if (domainWords.includes(brand)) {
+             const hasAffix = domainWords.some(p => AFFIX_LIST.includes(p));
+             if (hasAffix) {
+               foundBrandMisuse = true;
+               targetBrand = brand;
+               break;
+             }
+          }
+        }
+
+        // 3. Char Substitution Typosquatting (e.g. paypa1) OR Edit Distance
+        if (!foundTyposquat && !foundBrandMisuse) {
+          const normalized = domainLabel
+            .replace(/0/g, "o").replace(/1/g, "i").replace(/3/g, "e")
+            .replace(/@/g, "a").replace(/\$/g, "s").replace(/5/g, "s")
+            .replace(/4/g, "a");
+            
+          for (const brand of TRUSTED_BRANDS) {
+             // Substitution spoof
+             if (domainLabel !== brand && normalized === brand) {
+                foundTyposquat = true;
+                targetBrand = brand;
+                break;
+             }
+             // Edit Distance (e.g., hdfccbank padding spoof)
+             if (normalized !== brand) {
+               // Must be close in length so 'u' doesn't flag 'uber'
+               if ((normalized.includes(brand) && Math.abs(normalized.length - brand.length) <= 4) ||
+                   (brand.includes(normalized) && Math.abs(brand.length - normalized.length) <= 2 && normalized.length >= 4)) {
+                 foundTyposquat = true;
+                 targetBrand = brand;
+                 break;
+               }
+             }
+          }
+        }
+        
+        // 4. Exact match in an unverified TLD (General Brand Misuse)
+        if (!foundTyposquat && !foundBrandMisuse && TRUSTED_BRANDS.includes(domainLabel)) {
+           foundBrandMisuse = true;
+           targetBrand = domainLabel;
+        }
+
+        // Apply Scores
+        if (foundTyposquat) {
           isTyposquat = true;
           riskScore += 60;
-          const brandName = typosquatBrand || (oldFakeMatch && oldFakeMatch.real);
-          reasons.push(`Typosquatting detected: domain impersonates "${brandName}"`);
-        } else {
-          // ── PRIORITY 3: BRAND MISUSE — real name in unofficial domain ────────
-          // e.g. amazon-login-secure.net, paypal-verification.xyz, or sbi.in
-          const brandInDomain = TRUSTED_BRANDS.find(brand => domainLabel.includes(brand));
-          if (brandInDomain) {
-            isBrandMisuse = true;
-            riskScore += 50;
-            reasons.push(`Brand "${brandInDomain}" used in unofficial domain (impersonation)`);
-          }
+          reasons.push(`Typosquatting detected: domain impersonates "${targetBrand}"`);
+          addLog('danger', `Typosquatting pattern detected: domain impersonates "${targetBrand}"`);
+        } else if (foundBrandMisuse) {
+          isBrandMisuse = true;
+          riskScore += 50;
+          reasons.push(`Brand Impersonation: "${targetBrand}" used in unofficial/unverified domain`);
+          addLog('danger', `Brand Impersonation detected: "${targetBrand}" in unverified namespace`);
         }
       }
     } catch(e) {}
@@ -555,12 +656,15 @@ const TRUSTED_ROOTS = new Set([
         'linkedin.com','x.com','t.me','wa.me','whatsapp.com','pinterest.com'];
       const hasSocialLinks = SOCIAL_DOMAINS.some(d => lowerHtml2.includes(d));
 
-      // Total institution confidence score
-      const institutionConfidence = tldInstitutionScore + contentInstitutionScore + structureScore;
+      // Base identity must be strong (TLD or institutional keywords).
+      // Structural richness alone cannot make a site 'Institutional'.
+      const baseIdentityScore = tldInstitutionScore + contentInstitutionScore;
+      const institutionConfidence = baseIdentityScore + structureScore;
 
-      if (institutionConfidence >= 30) {
+      if (baseIdentityScore >= 20 && institutionConfidence >= 30) {
         isLegitInstitution = true;
         const DAMPENING = institutionConfidence >= 60 ? 0.35 : 0.55;
+        addLog('info', `Institutional signals detected (Score: ${institutionConfidence}pts). Applying risk dampening.`);
 
         // Apply dampening to suppress noise-inflated score
         const rawScore = riskScore;
@@ -658,6 +762,7 @@ const TRUSTED_ROOTS = new Set([
     // Only runs if key exists and site is not already trusted
     if (SAFE_BROWSING_KEY && !isTrustedBrand && riskLevel !== "HIGH") {
       try {
+        addLog('info', 'Querying Google Safe Browsing threat databases');
         const sbEndpoint = `https://safebrowsing.googleapis.com/v4/threatMatches:find?key=${SAFE_BROWSING_KEY}`;
         const sbRes = await fetch(sbEndpoint, {
           method: "POST",
@@ -674,6 +779,7 @@ const TRUSTED_ROOTS = new Set([
         });
         const sbData = await sbRes.json();
         if (sbData.matches && sbData.matches.length > 0) {
+          addLog('danger', 'Safe Browsing hit: Google threat database match found');
           riskScore = Math.max(riskScore, 70);
           reasons.push("Google Safe Browsing: URL flagged as dangerous");
           if (riskLevel !== "HIGH") {
@@ -700,6 +806,7 @@ const TRUSTED_ROOTS = new Set([
 
     if (GEMINI_KEY && !isTrustedBrand && !isBlocked) {
       try {
+        addLog('info', 'Executing deep payload analysis via Gemini AI');
         const truncatedHtml = htmlContent ? htmlContent.slice(0, 3000) : "(no content available)";
         const geminiPrompt = [
           "You are a cybersecurity expert specializing in phishing detection.",
@@ -739,6 +846,7 @@ const TRUSTED_ROOTS = new Set([
 
         // Apply AI result ONLY if confidence >= 60 and NOT trusted domain or institution
         if (aiConfidence >= 60 && !isTrustedBrand) {
+          addLog(aiRiskLevel === "HIGH" ? 'danger' : 'warning', `AI analysis returned ${aiRiskLevel} risk (conf: ${aiConfidence}%)`);
           if (aiRiskLevel === "HIGH" && !isTrustedBrand) {
             // Escalate score to HIGH band — label re-derives from score at end
             riskScore = Math.max(riskScore, 65);
@@ -830,6 +938,7 @@ const TRUSTED_ROOTS = new Set([
       if (fakeLoginDetected) {
         const contribution = Math.min(60, credentialRiskScore);
         riskScore = Math.min(100, riskScore + contribution);
+        addLog('danger', `Credential harvesting form detected (Risk +${contribution})`);
       }
     }
 
@@ -850,6 +959,7 @@ const TRUSTED_ROOTS = new Set([
     ];
 
     try {
+      addLog('info', 'Initializing Tesseract.js OCR to scan screenshot text');
       // Race against a 20s timeout — OCR must not block the full response
       const ocrTimeout = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('OCR timeout after 20s')), 20000)
@@ -870,6 +980,7 @@ const TRUSTED_ROOTS = new Set([
 
       const rawOcrText = await Promise.race([ocrRun, ocrTimeout]);
       ocrDetectedText = rawOcrText.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 500);
+      addLog('success', 'OCR extraction completed');
 
       // Match against phishing phrase list
       const foundOcrPhrases = OCR_PHRASES.filter(p => ocrDetectedText.includes(p));
@@ -890,6 +1001,7 @@ const TRUSTED_ROOTS = new Set([
           else                       ocrRiskScore = 10;
           // Only update score — riskLevel re-derives from score at the very end
           riskScore = Math.min(100, riskScore + ocrRiskScore);
+          addLog('warning', `OCR found ${phraseCount} suspicious phishing phrase(s) in screenshot`);
         }
       }
 
@@ -955,18 +1067,45 @@ const TRUSTED_ROOTS = new Set([
         credentialRiskScore = 0;
 
         explanation = `This is a trusted official domain:\n• Login forms and authentication pages on verified domains are expected and safe\n• No malicious signals were detected outside of normal login page behavior\n\nAlways ensure you are on the correct domain before entering credentials.`;
+        addLog('info', 'ABSOLUTE TRUST OVERRIDE applied — forced LOW + badge sanitization');
         if (isDev) console.error(`[CIVIX] ABSOLUTE TRUST OVERRIDE applied — forced LOW + badge sanitization for trusted root`);
       } else {
+        addLog('warning', 'TRUST OVERRIDE skipped — genuine threat detected');
         if (isDev) console.error(`[CIVIX] TRUST OVERRIDE skipped — genuine threat detected: SB=${hasSafeBrowsingHit}, ExternalExfil=${hasExternalExfiltration}`);
       }
     }
 
-    // \u2500\u2500\u2500 DEFINITIVE FINAL CLASSIFICATION \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    addLog('info', 'Finalizing risk classifications and packing report');
+
+    // ─── DEFINITIVE FINAL CLASSIFICATION ────────────────────────────────────
     // After every score mutation (heuristics, dampening, OCR, fake login, trust caps,
     // trust override), recompute riskLevel from the actual final number.
     // This is the one and only place where riskLevel is written to the output.
     const finalScore = Math.min(100, Math.max(0, Math.round(riskScore)));
     const finalLevel = scoreToLevel(finalScore);
+
+    // ─── RISK CATEGORY INTELLIGENCE ─────────────────────────────────────────
+    let threatCategory = "Unknown";
+    
+    if (finalLevel === "LOW") {
+      if (isTrustedBrand) threatCategory = "Verified Official Brand";
+      else if (isLegitInstitution) threatCategory = "Legitimate Institution";
+      else threatCategory = "Safe / Low Risk";
+    } else {
+      if (isBlocked) {
+        threatCategory = "Evasion / Blocked Analysis";
+      } else if (reasons.some(r => r.includes("Safe Browsing"))) {
+        threatCategory = "Known Malicious / Blocklisted";
+      } else if (isTyposquat || isBrandMisuse) {
+        threatCategory = "Brand Impersonation / Typosquatting";
+      } else if (fakeLoginDetected || reasons.some(r => r.includes("exfiltration") || r.includes("Credential"))) {
+        threatCategory = "Credential Harvester";
+      } else if (isScamPage || reasons.some(r => r.includes("Scam/manipulation") || r.includes("Urgency"))) {
+        threatCategory = "Scam / Deceptive Warning";
+      } else {
+        threatCategory = "Suspicious Metadata / Generic Risk";
+      }
+    }
 
     // Sync explanation if label changed from intermediate value
     if (finalLevel !== riskLevel && !isTrustedBrand) {
@@ -998,8 +1137,12 @@ const TRUSTED_ROOTS = new Set([
         ocrDetectedText,
         ocrSignals,
         ocrRiskScore,
+        threatCategory,
       }
     };
+
+    result.logs = logs;
+    addLog('success', 'Analysis complete. Constructing final security report.');
 
     console.log(JSON.stringify(result));
 
@@ -1007,7 +1150,13 @@ const TRUSTED_ROOTS = new Set([
     if (browser) {
       try { await browser.close(); } catch {}
     }
-    console.error(err.message || "Unknown error inside Playwright script");
+    
+    addLog('danger', `Critical sandbox error: ${err.message}`);
+    // Output valid JSON even on strict failure
+    console.log(JSON.stringify({ 
+      error: err.message || "Unknown error inside Playwright script",
+      logs 
+    }));
     process.exit(1);
   }
 })();

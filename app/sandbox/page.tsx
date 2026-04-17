@@ -9,6 +9,12 @@ const SCAN_STEPS = [
   "Threat intelligence match...",
 ];
 
+type LogItem = {
+  time: string;
+  type: "info" | "success" | "warning" | "danger";
+  msg: string;
+};
+
 type Analysis = {
   riskScore: number;
   riskLevel: "LOW" | "MEDIUM" | "HIGH";
@@ -23,6 +29,7 @@ type Analysis = {
   ocrDetectedText?: string;
   ocrSignals?: string[];
   ocrRiskScore?: number;
+  threatCategory?: string;
 };
 
 function getConfidence(level: string, score: number): number {
@@ -131,7 +138,15 @@ export default function SandboxPage() {
   const [reported, setReported] = useState(false);
   const [scanTime, setScanTime] = useState<number | null>(null);
   const [scannedUrl, setScannedUrl] = useState<string | null>(null);
+  const [logs, setLogs] = useState<LogItem[]>([]);
   const scanStartRef = useRef<number>(0);
+  const logsEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (logsEndRef.current) {
+      logsEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [logs]);
 
   useEffect(() => {
     let interval: ReturnType<typeof setInterval>;
@@ -162,6 +177,7 @@ export default function SandboxPage() {
     setReported(false);
     setScanTime(null);
     setScannedUrl(submitUrl);
+    setLogs([]);
     scanStartRef.current = Date.now();
 
     try {
@@ -174,6 +190,10 @@ export default function SandboxPage() {
       const data = await res.json();
       const elapsed = (Date.now() - scanStartRef.current) / 1000;
       setScanTime(parseFloat(elapsed.toFixed(1)));
+
+      if (data.logs) {
+        setLogs(data.logs);
+      }
 
       if (!res.ok) {
         setError(data.error || "An error occurred while scanning.");
@@ -442,6 +462,28 @@ export default function SandboxPage() {
               {analysis.explanation && (
                 <div style={{ borderTop: "1px solid #1e1e2a", paddingTop: "14px" }}>
                   <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: "10px", color: "#444", letterSpacing: "2px", marginBottom: "10px" }}>ANALYSIS SUMMARY</div>
+                  
+                  {analysis.threatCategory && (
+                    <div style={{ 
+                      display: "inline-block", 
+                      padding: "6px 12px", 
+                      background: riskColor(analysis.riskLevel) + "15",
+                      border: `1px solid ${riskColor(analysis.riskLevel)}88`,
+                      color: riskColor(analysis.riskLevel),
+                      borderRadius: "6px",
+                      fontFamily: "'Share Tech Mono', monospace",
+                      fontSize: "13px",
+                      marginBottom: "14px",
+                      textTransform: "uppercase",
+                      letterSpacing: "1px"
+                    }}>
+                      {analysis.riskLevel === "LOW" 
+                        ? `🛡️ ${analysis.threatCategory}`
+                        : `🚨 THREAT: ${analysis.threatCategory}`
+                      }
+                    </div>
+                  )}
+
                   <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                     {analysis.explanation.split("\n").map((line, i) => {
                       const isBullet = line.startsWith("\u2022");
@@ -583,6 +625,41 @@ export default function SandboxPage() {
                   ✔️ Site reported successfully. Authorities will review it.
                 </div>
               )}
+            </div>
+          )}
+
+          {/* ── LIVE FORENSIC CONSOLE ────────────────────────────────────────────── */}
+          {logs.length > 0 && (
+            <div className="fade-in" style={{ marginTop: "30px", background: "#0a0a0f", borderRadius: "10px", border: "1px solid #1e1e2a", overflow: "hidden", boxShadow: "0 10px 40px rgba(0,0,0,0.5)" }}>
+              <div style={{ background: "#151520", padding: "12px 16px", borderBottom: "1px solid #1e1e2a", display: "flex", alignItems: "center", gap: "12px" }}>
+                <div style={{ width: "10px", height: "10px", borderRadius: "50%", background: "#ff2d55", boxShadow: "0 0 10px #ff2d55" }}></div>
+                <div style={{ width: "10px", height: "10px", borderRadius: "50%", background: "#ffc300", boxShadow: "0 0 10px #ffc300" }}></div>
+                <div style={{ width: "10px", height: "10px", borderRadius: "50%", background: "#00ff66", boxShadow: "0 0 10px #00ff66" }}></div>
+                <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: "14px", color: "#00e5ff", letterSpacing: "2px", marginLeft: "10px" }}>LIVE FORENSIC CONSOLE</span>
+              </div>
+              <div style={{ maxHeight: "350px", overflowY: "auto", padding: "20px", display: "flex", flexDirection: "column", gap: "6px" }}>
+                {logs.map((log, i) => (
+                  <div key={i} className="fade-in" style={{
+                    fontFamily: "'Share Tech Mono', monospace",
+                    fontSize: "13px",
+                    lineHeight: "1.5",
+                    animationDelay: `${i * 0.15}s`,
+                    animationFillMode: "both",
+                    display: "flex",
+                    gap: "12px",
+                  }}>
+                    <span style={{ color: "#666", minWidth: "110px", whiteSpace: "nowrap" }}>[{log.time}]</span>
+                    <span style={{ 
+                      color: log.type === 'success' ? '#00ff66' : log.type === 'warning' ? '#ffc300' : log.type === 'danger' ? '#ff2d55' : '#00e5ff', 
+                      minWidth: "75px", textTransform: "uppercase", fontWeight: "bold" 
+                    }}>
+                      {log.type}
+                    </span>
+                    <span style={{ color: "#dcdcaa", wordBreak: "break-word" }}>{log.msg}</span>
+                  </div>
+                ))}
+                <div ref={logsEndRef} style={{ height: "10px" }} />
+              </div>
             </div>
           )}
 
